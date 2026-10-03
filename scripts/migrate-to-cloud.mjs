@@ -423,8 +423,6 @@ export async function createCloudMigrationBundle({
 
     const hasLocalMappings = deviceProjectMappings.length > 0 || deviceTaskWorktrees.length > 0;
     const randomHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
-    const initialPairingCode = "INIT" + Math.floor(10 + Math.random() * 90);
-    const pairingExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
     const devices = hasLocalMappings
       ? [{
@@ -439,21 +437,9 @@ export async function createCloudMigrationBundle({
         }]
       : [];
 
-    const devicePairingCodes = hasLocalMappings
-      ? [{
-          code: initialPairingCode,
-          device_name: initialDeviceName,
-          device_token: null,
-          status: "pending",
-          expires_at: pairingExpiresAt,
-          created_at: nowStr,
-          approved_at: null,
-          device_id: initialDeviceId,
-        }]
-      : [];
 
     tables.devices = devices;
-    tables.device_pairing_codes = devicePairingCodes;
+    tables.device_pairing_codes = [];
     tables.device_project_mappings = deviceProjectMappings;
     tables.device_task_worktrees = deviceTaskWorktrees;
     tables.device_automations = tables.device_automations ?? [];

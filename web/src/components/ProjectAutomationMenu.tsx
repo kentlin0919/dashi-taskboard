@@ -155,7 +155,7 @@ export function ProjectAutomationMenu({
               ? text("运行中", "Running")
               : text("已暂停", "Paused")));
   const selectedModel = models.find((model) => model.slug === draft.model) ?? models[0];
-  const disabled = pending || !selectedModel || Boolean(unavailableReason);
+  const disabled = pending || (!currentDevice && (!selectedModel || Boolean(unavailableReason)));
 
   useEffect(() => {
     if (!open) return;
@@ -423,8 +423,8 @@ export function ProjectAutomationMenu({
             )}
         </p>
       )}
-      {unavailableReason && <p className="project-automation-note">{unavailableReason}</p>}
-      {error && error !== unavailableReason && <p className="project-automation-error" role="alert">{error}</p>}
+      {!currentDevice && unavailableReason && <p className="project-automation-note">{unavailableReason}</p>}
+      {!currentDevice && error && error !== unavailableReason && <p className="project-automation-error" role="alert">{error}</p>}
     </div>,
     document.body,
   ) : null;

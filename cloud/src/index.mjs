@@ -30,10 +30,6 @@ import {
   parseProjectLabel,
 } from "../../shared/api-fields.mjs";
 
-const BaseDurableObject = typeof DurableObject !== "undefined"
-  ? DurableObject
-  : class {};
-
 import { DEFAULT_LABEL_NAMES, TASK_STATUSES, TASK_PRIORITIES } from "../../shared/domain.mjs";
 
 const JSON_BODY_LIMIT = 1024 * 1024;
@@ -83,7 +79,12 @@ const SITE_MIGRATION_TABLE_COLUMNS = {
 };
 const SITE_MIGRATION_TABLE_ORDER = Object.keys(SITE_MIGRATION_TABLE_COLUMNS);
 
-export class RealtimeHub extends BaseDurableObject {
+export class RealtimeHub {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/connect") {
@@ -2559,7 +2560,16 @@ async function requestDevicePairingCode(request, env) {
   }
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const createdAt = now();
-  await env.DB.prepare(`
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE device_pairing_codes SET status = 'expired'
+      WHERE status = 'pending' AND device_token IS NULL
+        AND code GLOB 'INIT[0-9][0-9]'
+        AND device_id IN (
+          SELECT id FROM devices WHERE name = ? AND status = 'pending_pairing'
+        )
+    `).bind(deviceName),
+    env.DB.prepare(`
     INSERT INTO device_pairing_codes (code, device_name, status, expires_at, created_at, device_id)
     VALUES (?, ?, 'pending', ?, ?, (
       SELECT CASE WHEN COUNT(*) = 1 THEN MAX(d.id) END
@@ -2573,7 +2583,8 @@ async function requestDevicePairingCode(request, env) {
             AND p.expires_at > ?
         )
     ))
-  `).bind(code, deviceName, expiresAt, createdAt, deviceName, createdAt).run();
+  `).bind(code, deviceName, expiresAt, createdAt, deviceName, createdAt),
+  ]);
   return json(200, { code, pairingCode: code, deviceName, expiresAt });
 }
 
