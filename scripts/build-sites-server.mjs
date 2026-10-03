@@ -54,7 +54,7 @@ async function main() {
     assets[path] = {
       body: compressed.toString("base64"),
       contentType: assetTypes[extname(filename).toLowerCase()] ?? "application/octet-stream",
-      etag: `"${createHash("sha256").update(content).digest("hex")}"`,
+      etag: `"identity-${createHash("sha256").update(content).digest("hex")}"`,
       size: content.byteLength,
     };
   }
