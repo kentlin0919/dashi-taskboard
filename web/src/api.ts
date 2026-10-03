@@ -831,22 +831,20 @@ export interface PairingRequest {
 }
 
 export interface DeviceAutomation {
-  device_id: string;
-  device_name: string;
-  device_status: "active" | "revoked";
-  last_heartbeat_at: string | null;
-  last_status: {
+  deviceId: string;
+  deviceName: string;
+  deviceStatus: "active" | "revoked";
+  lastHeartbeatAt: string | null;
+  lastStatus: {
     isRunning?: boolean;
     currentTaskId?: string | null;
   } | null;
-  project_id: string;
-  enabled_by_user: boolean;
-  quota_aware: boolean;
-  interval_minutes: number;
+  enabledByUser: boolean;
+  quotaAware: boolean;
+  intervalMinutes: number;
   model: string;
-  reasoning_effort: string;
-  created_at: string;
-  updated_at: string;
+  reasoningEffort: string;
+  workspacePath: string | null;
 }
 
 export async function fetchDevices(): Promise<Device[]> {

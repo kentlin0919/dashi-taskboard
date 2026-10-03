@@ -91,20 +91,20 @@ export function ProjectAutomationMenu({
   const [pickerMenu, setPickerMenu] = useState<"device" | "interval" | "model" | "reasoning" | null>(null);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>(
-    () => deviceAutomations?.[0]?.device_id ?? ""
+    () => deviceAutomations?.[0]?.deviceId ?? ""
   );
 
-  const currentDevice = deviceAutomations?.find((d) => d.device_id === selectedDeviceId)
+  const currentDevice = deviceAutomations?.find((d) => d.deviceId === selectedDeviceId)
     ?? deviceAutomations?.[0];
 
   const [draft, setDraft] = useState<AutomationOptions>(() => {
     if (currentDevice) {
       return {
-        enabledByUser: currentDevice.enabled_by_user,
-        quotaAware: currentDevice.quota_aware,
-        intervalMinutes: (currentDevice.interval_minutes as IntervalMinutes) || 5,
+        enabledByUser: currentDevice.enabledByUser,
+        quotaAware: currentDevice.quotaAware,
+        intervalMinutes: (currentDevice.intervalMinutes as IntervalMinutes) || 5,
         model: currentDevice.model || models[0]?.slug || "",
-        reasoningEffort: currentDevice.reasoning_effort || "",
+        reasoningEffort: currentDevice.reasoningEffort || "",
       };
     }
     return automationOptions(models, automation);
@@ -113,19 +113,19 @@ export function ProjectAutomationMenu({
   useEffect(() => {
     if (currentDevice) {
       setDraft({
-        enabledByUser: currentDevice.enabled_by_user,
-        quotaAware: currentDevice.quota_aware,
-        intervalMinutes: (currentDevice.interval_minutes as IntervalMinutes) || 5,
+        enabledByUser: currentDevice.enabledByUser,
+        quotaAware: currentDevice.quotaAware,
+        intervalMinutes: (currentDevice.intervalMinutes as IntervalMinutes) || 5,
         model: currentDevice.model || models[0]?.slug || "",
-        reasoningEffort: currentDevice.reasoning_effort || "",
+        reasoningEffort: currentDevice.reasoningEffort || "",
       });
     }
   }, [currentDevice]);
 
-  const isOnline = currentDevice?.last_heartbeat_at
-    ? Date.now() - new Date(currentDevice.last_heartbeat_at).getTime() < 120_000
+  const isOnline = currentDevice?.lastHeartbeatAt
+    ? Date.now() - new Date(currentDevice.lastHeartbeatAt).getTime() < 120_000
     : false;
-  const isDeviceRunning = Boolean(currentDevice?.last_status?.isRunning);
+  const isDeviceRunning = Boolean(currentDevice?.lastStatus?.isRunning);
 
   const status = automation?.status ?? "PAUSED";
   const quota = automation?.quota;
@@ -136,12 +136,12 @@ export function ProjectAutomationMenu({
       : null;
 
   const stateLabel = currentDevice
-    ? !currentDevice.enabled_by_user
+    ? !currentDevice.enabledByUser
       ? text("已暂停", "Paused")
       : isDeviceRunning
         ? text("正在执行", "Running")
         : isOnline
-          ? text(`排程已设定（每 ${currentDevice.interval_minutes} 分钟）`, `Scheduled (${currentDevice.interval_minutes} min)`)
+          ? text(`排程已设定（每 ${currentDevice.intervalMinutes} 分钟）`, `Scheduled (${currentDevice.intervalMinutes} min)`)
           : text("设备离线", "Device offline")
     : (idleLabel ?? (!automation?.enabledByUser
       ? text("已暂停", "Paused")
@@ -161,11 +161,11 @@ export function ProjectAutomationMenu({
     if (!open) return;
     if (currentDevice) {
       setDraft({
-        enabledByUser: currentDevice.enabled_by_user,
-        quotaAware: currentDevice.quota_aware,
-        intervalMinutes: (currentDevice.interval_minutes as IntervalMinutes) || 5,
+        enabledByUser: currentDevice.enabledByUser,
+        quotaAware: currentDevice.quotaAware,
+        intervalMinutes: (currentDevice.intervalMinutes as IntervalMinutes) || 5,
         model: currentDevice.model || models[0]?.slug || "",
-        reasoningEffort: currentDevice.reasoning_effort || "",
+        reasoningEffort: currentDevice.reasoningEffort || "",
       });
     } else {
       setDraft(automationOptions(models, automation));
@@ -219,7 +219,7 @@ export function ProjectAutomationMenu({
     if (disabled) return;
     setDraft(next);
     if (currentDevice && onDeviceChange) {
-      onDeviceChange(currentDevice.device_id, next);
+      onDeviceChange(currentDevice.deviceId, next);
     } else {
       onChange(next);
     }
@@ -244,10 +244,10 @@ export function ProjectAutomationMenu({
         <div className="project-automation-field" style={{ marginBottom: 8 }}>
           <span>{text("执行设备", "Device")}</span>
           <TaskPropertyPicker
-            value={currentDevice?.device_id ?? ""}
+            value={currentDevice?.deviceId ?? ""}
             options={deviceAutomations.map((d) => ({
-              value: d.device_id,
-              label: d.device_name,
+              value: d.deviceId,
+              label: d.deviceName,
               icon: <LinearIcon name="terminal" color="currentColor" width={14} height={14} />,
             }))}
             open={pickerMenu === "device"}

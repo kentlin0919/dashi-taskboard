@@ -2664,29 +2664,33 @@ async function approveDevicePairing(request, env) {
   const createdAt = now();
 
   const existingDevice = await env.DB.prepare("SELECT id FROM devices WHERE id = ?").bind(targetDeviceId).first();
-  if (existingDevice) {
-    await env.DB.prepare(`
-      UPDATE devices
-      SET token_hash = ?, status = 'active', updated_at = ?
-      WHERE id = ?
-    `).bind(tokenHash, createdAt, targetDeviceId).run();
-  } else {
-    await env.DB.prepare(`
-      INSERT INTO devices (id, name, token_hash, status, created_at, updated_at)
-      VALUES (?, ?, ?, 'active', ?, ?)
-    `).bind(targetDeviceId, row.device_name, tokenHash, createdAt, createdAt).run();
-  }
-
-  const updateResult = await env.DB.prepare(`
-    UPDATE device_pairing_codes
-    SET status = 'approved', approved_at = ?, device_id = ?, device_token = ?
-    WHERE code = ? AND status = 'pending' AND expires_at > ?
-  `).bind(createdAt, targetDeviceId, deviceToken, code, createdAt).run();
+  const deviceStatement = existingDevice
+    ? env.DB.prepare(`
+        UPDATE devices
+        SET token_hash = ?, status = 'active', updated_at = ?
+        WHERE id = ? AND EXISTS (
+          SELECT 1 FROM device_pairing_codes
+          WHERE code = ? AND status = 'pending' AND expires_at > ?
+        )
+      `).bind(tokenHash, createdAt, targetDeviceId, code, createdAt)
+    : env.DB.prepare(`
+        INSERT INTO devices (id, name, token_hash, status, created_at, updated_at)
+        SELECT ?, ?, ?, 'active', ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM device_pairing_codes
+          WHERE code = ? AND status = 'pending' AND expires_at > ?
+        )
+      `).bind(targetDeviceId, row.device_name, tokenHash, createdAt, createdAt, code, createdAt);
+  const [, updateResult] = await env.DB.batch([
+    deviceStatement,
+    env.DB.prepare(`
+      UPDATE device_pairing_codes
+      SET status = 'approved', approved_at = ?, device_id = ?, device_token = ?
+      WHERE code = ? AND status = 'pending' AND expires_at > ?
+    `).bind(createdAt, targetDeviceId, deviceToken, code, createdAt),
+  ]);
   const changes = updateResult.meta?.changes ?? updateResult.changes ?? 0;
   if (changes === 0) {
-    if (!existingDevice) {
-      await env.DB.prepare("DELETE FROM devices WHERE id = ?").bind(targetDeviceId).run();
-    }
     throw new ApiError(400, "INVALID_STATE", "Pairing code could not be approved or was already processed");
   }
 
@@ -2967,7 +2971,7 @@ async function importSiteMigration(request, env) {
     }
   }
 
-  const attachmentRows = new Map(tables.attachments.map((row) => [row.id, row]));
+  const attachmentRows = new Map([...tables.attachments, ...tables.project_readme_attachments].map((row) => [row.id, row]));
   const taskProjects = new Map(tables.tasks.map((task) => [task.id, task.project_id]));
   const attachments = bundle.attachments;
   if (!Array.isArray(attachments) || attachments.length !== attachmentRows.size) {
@@ -2992,7 +2996,7 @@ async function importSiteMigration(request, env) {
       !row
       || Number(row.size) !== Number(attachment.size)
       || Number(attachment.size) > ATTACHMENT_BODY_LIMIT
-      || attachment.projectId !== taskProjects.get(row.task_id)
+      || attachment.projectId !== (row.project_id ?? taskProjects.get(row.task_id))
     ) {
       throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENT", "Migration attachment size does not match its metadata");
     }

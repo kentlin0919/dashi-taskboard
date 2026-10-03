@@ -133,7 +133,7 @@ export function DeviceManagementDialog({
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {requests.map((req) => (
                 <div
-                  key={req.id}
+                  key={req.pairing_code}
                   style={{
                     display: "flex",
                     alignItems: "center",

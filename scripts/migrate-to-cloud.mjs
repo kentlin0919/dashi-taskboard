@@ -151,8 +151,8 @@ function buildProjectCounts(tables) {
     if (!projectId) throw new Error(`Comment '${comment.id}' references unknown task '${comment.task_id}'`);
     counts[projectId].comments += 1;
   }
-  for (const attachment of tables.attachments) {
-    const projectId = taskProjects.get(attachment.task_id);
+  for (const attachment of [...tables.attachments, ...(tables.project_readme_attachments ?? [])]) {
+    const projectId = attachment.project_id ?? taskProjects.get(attachment.task_id);
     if (!projectId) {
       throw new Error(`Attachment '${attachment.id}' references unknown task '${attachment.task_id}'`);
     }
@@ -194,7 +194,7 @@ async function readAttachmentPayloads(tables, attachmentsDirectory) {
   const taskProjects = new Map(tables.tasks.map((task) => [task.id, task.project_id]));
   const payloads = [];
 
-  for (const attachment of tables.attachments) {
+  for (const attachment of [...tables.attachments, ...(tables.project_readme_attachments ?? [])]) {
     assertSafeAttachmentId(attachment.id);
     const sourcePath = path.join(attachmentsDirectory, attachment.id);
     let file;
@@ -216,7 +216,7 @@ async function readAttachmentPayloads(tables, attachmentsDirectory) {
         `Attachment '${attachment.id}' size mismatch: SQLite=${attachment.size}, file=${body.byteLength}`,
       );
     }
-    const projectId = taskProjects.get(attachment.task_id);
+    const projectId = attachment.project_id ?? taskProjects.get(attachment.task_id);
     payloads.push({
       id: attachment.id,
       projectId,
@@ -332,12 +332,13 @@ function validateBundle(bundle) {
 
   const calculatedCounts = buildProjectCounts(bundle.tables);
   assertCountsMatch(calculatedCounts, bundle.counts?.byProject);
-  const attachmentRows = new Map(bundle.tables.attachments.map((row) => [row.id, row]));
+  const attachmentMetadata = [...bundle.tables.attachments, ...(bundle.tables.project_readme_attachments ?? [])];
+  const attachmentRows = new Map(attachmentMetadata.map((row) => [row.id, row]));
   const attachmentPayloads = new Map(
     bundle.attachments.map((attachment) => [attachment.id, attachment]),
   );
   if (
-    attachmentRows.size !== bundle.tables.attachments.length
+    attachmentRows.size !== attachmentMetadata.length
     || attachmentPayloads.size !== bundle.attachments.length
     || attachmentRows.size !== attachmentPayloads.size
   ) {
@@ -362,7 +363,7 @@ function validateBundle(bundle) {
     if (Number(row.size) !== attachment.size) {
       throw new Error(`Attachment '${attachment.id}' metadata size does not match its payload`);
     }
-    const projectId = taskProjects.get(row.task_id);
+    const projectId = row.project_id ?? taskProjects.get(row.task_id);
     if (attachment.projectId !== projectId) {
       throw new Error(
         `Attachment '${attachment.id}' project does not match its task project`,
@@ -436,7 +437,6 @@ export async function createCloudMigrationBundle({
           updated_at: nowStr,
         }]
       : [];
-
 
     tables.devices = devices;
     tables.device_pairing_codes = [];
@@ -759,7 +759,8 @@ export async function importCloudMigrationBundle(bundle, { d1, r2 }) {
     }
   }
 
-  const attachmentRows = new Map(bundle.tables.attachments.map((row) => [row.id, row]));
+  const attachmentMetadata = [...bundle.tables.attachments, ...(bundle.tables.project_readme_attachments ?? [])];
+  const attachmentRows = new Map(attachmentMetadata.map((row) => [row.id, row]));
   const uploadedKeys = [];
   let d1Committed = false;
   try {
@@ -980,7 +981,7 @@ export async function runCli(
     const bundle = await createCloudMigrationBundle({
       databasePath: options.database,
       attachmentsDirectory: options.attachments,
-      multidevice: options.multidevice === "true" || options.multidevice === "1",
+      multidevice: options.multidevice === undefined || options.multidevice === "true" || options.multidevice === "1",
       initialDeviceId: options.deviceId ?? "local-device",
       initialDeviceName: options.deviceName ?? "Migrated Computer",
     });

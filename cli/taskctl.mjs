@@ -32,9 +32,7 @@ const sourceRuntimeFile = path.resolve(
   "launcher-runtime.json",
 );
 const deviceCredentialsFile = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  ".data",
+  process.env.CODEX_TASKBOARD_DATA_DIR || path.dirname(sourceRuntimeFile),
   "device-credentials.json",
 );
 const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help", "once"]);
@@ -428,12 +426,17 @@ async function execute(parsed, overrides) {
     case "device revoke":
       expectOperandCount(parsed, 0);
       return deviceRevoke(overrides);
-    case "device agent":
+    case "device agent": {
       expectOperandCount(parsed, 0);
+      const intervalSeconds = parsed.options.interval === undefined ? 30 : Number(parsed.options.interval);
+      if (!Number.isFinite(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 2_147_483) {
+        throw usageError("Device agent interval must be between 1 and 2147483 seconds");
+      }
       return deviceAgent(overrides, {
-        intervalSeconds: parsed.options.interval ? Number(parsed.options.interval) : 30,
+        intervalSeconds,
         once: Boolean(parsed.options.once),
       });
+    }
     case "issue list":
       expectOperandCount(parsed, 0);
       return listIssues(api, parsed.options);
