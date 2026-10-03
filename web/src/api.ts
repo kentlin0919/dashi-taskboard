@@ -260,8 +260,10 @@ export async function getAiChatCatalog(
   projectId: string,
   signal?: AbortSignal,
   codexProjectIdentity?: CodexProjectIdentity | null,
+  scope: "full" | "models" = "full",
 ): Promise<AiChatCatalog> {
   const query = new URLSearchParams();
+  if (scope === "models") query.set("scope", scope);
   if (codexProjectIdentity) {
     query.set("codexProjectId", codexProjectIdentity.codexProjectId);
     query.set("codexProjectKind", codexProjectIdentity.codexProjectKind);
@@ -805,4 +807,124 @@ export function resolvePersistedAttachmentUrl(value: string): string {
     return value;
   }
   return value;
+}
+
+export interface Device {
+  id: string;
+  name: string;
+  status: "active" | "revoked";
+  last_heartbeat_at: string | null;
+  last_status: {
+    isRunning?: boolean;
+    currentTaskId?: string | null;
+  } | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PairingRequest {
+  id: string;
+  pairing_code: string;
+  device_name: string;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface DeviceAutomation {
+  device_id: string;
+  device_name: string;
+  device_status: "active" | "revoked";
+  last_heartbeat_at: string | null;
+  last_status: {
+    isRunning?: boolean;
+    currentTaskId?: string | null;
+  } | null;
+  project_id: string;
+  enabled_by_user: boolean;
+  quota_aware: boolean;
+  interval_minutes: number;
+  model: string;
+  reasoning_effort: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchDevices(): Promise<Device[]> {
+  const data = await request<{ devices: Device[] }>("/api/devices");
+  return data.devices ?? [];
+}
+
+export async function fetchPairingRequests(): Promise<PairingRequest[]> {
+  const data = await request<{ requests: PairingRequest[] }>("/api/devices/pair/requests");
+  return data.requests ?? [];
+}
+
+export async function requestDevicePairingCode(deviceName: string): Promise<{
+  pairingCode: string;
+  expiresAt: string;
+}> {
+  return request("/api/devices/pair/request", {
+    method: "POST",
+    body: JSON.stringify({ deviceName }),
+  });
+}
+
+export async function claimDevicePairingCode(pairingCode: string): Promise<{
+  status: "pending" | "rejected" | "approved";
+  deviceId?: string;
+  deviceToken?: string;
+  deviceName?: string;
+  siteAuthorizationToken?: string | null;
+}> {
+  return request("/api/devices/pair/claim", {
+    method: "POST",
+    body: JSON.stringify({ pairingCode }),
+  });
+}
+
+export async function approvePairingRequest(pairingCode: string): Promise<{ success: boolean; deviceId: string; deviceName: string }> {
+  return request("/api/devices/pair/approve", {
+    method: "POST",
+    body: JSON.stringify({ pairingCode }),
+  });
+}
+
+export async function rejectPairingRequest(pairingCode: string): Promise<{ success: boolean }> {
+  return request("/api/devices/pair/reject", {
+    method: "POST",
+    body: JSON.stringify({ pairingCode }),
+  });
+}
+
+export async function revokeDevice(deviceId: string): Promise<{ success: boolean }> {
+  return request(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, {
+    method: "POST",
+  });
+}
+
+export async function fetchProjectDeviceAutomations(projectId: string): Promise<DeviceAutomation[]> {
+  const data = await request<{ automations: DeviceAutomation[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/devices/automations`
+  );
+  return data.automations ?? [];
+}
+
+export async function updateProjectDeviceAutomation(
+  projectId: string,
+  deviceId: string,
+  settings: {
+    enabledByUser: boolean;
+    quotaAware: boolean;
+    intervalMinutes: number;
+    model: string;
+    reasoningEffort: string;
+  }
+): Promise<{ success: boolean }> {
+  return request(
+    `/api/projects/${encodeURIComponent(projectId)}/devices/${encodeURIComponent(deviceId)}/automation`,
+    {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }
+  );
 }

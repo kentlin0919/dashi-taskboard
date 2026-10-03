@@ -20,7 +20,44 @@ import { DEFAULT_LABEL_NAMES } from "../shared/domain.mjs";
 const SCHEMA_VERSION = 2;
 const WRANGLER_D1_STATEMENT_MAX_BYTES = 90_000;
 const PROJECT_README_D1_CHUNK_CHARACTERS = 10_000;
-const TABLE_ORDER = [
+const LEGACY_TABLE_ORDER = [
+  "projects",
+  "project_readmes",
+  "tasks",
+  "comments",
+  "task_relations",
+  "attachments",
+];
+const MULTIDEVICE_TABLE_ORDER = [
+  "projects",
+  "project_readmes",
+  "tasks",
+  "task_activities",
+  "comments",
+  "task_relations",
+  "attachments",
+  "project_readme_attachments",
+  "devices",
+  "device_pairing_codes",
+  "device_project_mappings",
+  "device_task_worktrees",
+  "device_automations",
+];
+const TABLE_ORDER = LEGACY_TABLE_ORDER;
+
+function getTableOrder(bundleOrTablesOrManifest) {
+  if (!bundleOrTablesOrManifest) return LEGACY_TABLE_ORDER;
+  const tables = bundleOrTablesOrManifest.tables ?? bundleOrTablesOrManifest;
+  if (
+    Object.hasOwn(tables, "devices")
+    || Object.hasOwn(tables, "task_activities")
+    || Object.hasOwn(tables, "device_project_mappings")
+  ) {
+    return MULTIDEVICE_TABLE_ORDER;
+  }
+  return LEGACY_TABLE_ORDER;
+}
+const COUNTED_TABLES = [
   "projects",
   "project_readmes",
   "tasks",
@@ -32,9 +69,15 @@ const SORT_FIELDS = {
   projects: ["id"],
   project_readmes: ["project_id"],
   tasks: ["project_id", "identifier", "id"],
+  task_activities: ["task_id", "created_at", "id"],
   comments: ["task_id", "created_at", "id"],
   task_relations: ["source_task_id", "target_task_id", "relation_type"],
   attachments: ["task_id", "comment_id", "created_at", "id"],
+  project_readme_attachments: ["project_id", "created_at", "id"],
+  devices: ["id"],
+  device_project_mappings: ["device_id", "project_id"],
+  device_task_worktrees: ["device_id", "task_id"],
+  device_automations: ["device_id", "project_id"],
 };
 function compareValues(left, right) {
   if (left === right) return 0;
@@ -187,7 +230,7 @@ async function readAttachmentPayloads(tables, attachmentsDirectory) {
   return payloads;
 }
 
-async function readSnapshot(databasePath) {
+async function readSnapshot(databasePath, { multidevice = false } = {}) {
   const snapshotDirectory = await mkdtemp(path.join(os.tmpdir(), "taskboard-cloud-snapshot-"));
   const snapshotPath = path.join(snapshotDirectory, "taskboard.sqlite");
   let source;
@@ -212,10 +255,16 @@ async function readSnapshot(databasePath) {
         `SQLite snapshot failed PRAGMA foreign_key_check (${foreignKeyViolations.length} violation(s))`,
       );
     }
+    const existingTables = new Set(
+      snapshot.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name),
+    );
+    const tableOrder = multidevice ? MULTIDEVICE_TABLE_ORDER : LEGACY_TABLE_ORDER;
     const tables = Object.fromEntries(
-      TABLE_ORDER.map((table) => [
+      tableOrder.map((table) => [
         table,
-        sortRows(table, snapshot.prepare(`SELECT * FROM "${table}"`).all()),
+        existingTables.has(table)
+          ? sortRows(table, snapshot.prepare(`SELECT * FROM "${table}"`).all())
+          : [],
       ]),
     );
     snapshot.close();
@@ -255,7 +304,7 @@ function assertCountsMatch(expected, actual) {
     );
   }
   for (const projectId of expectedProjects) {
-    for (const table of TABLE_ORDER) {
+    for (const table of COUNTED_TABLES) {
       const expectedCount = Number(expected[projectId][table]);
       const actualCount = Number(actual[projectId]?.[table]);
       if (actualCount !== expectedCount) {
@@ -271,7 +320,8 @@ function validateBundle(bundle) {
   if (!bundle || bundle.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported cloud migration schema version '${bundle?.schemaVersion}'`);
   }
-  for (const table of TABLE_ORDER) {
+  const tableOrder = getTableOrder(bundle);
+  for (const table of tableOrder) {
     if (!Array.isArray(bundle.tables?.[table])) {
       throw new Error(`Cloud migration bundle is missing table '${table}'`);
     }
@@ -334,9 +384,83 @@ function validateBundle(bundle) {
 export async function createCloudMigrationBundle({
   databasePath,
   attachmentsDirectory,
-}) {
-  const tables = await readSnapshot(databasePath);
+  multidevice = false,
+  initialDeviceId = "local-device",
+  initialDeviceName = "Migrated Computer",
+} = {}) {
+  const tables = await readSnapshot(databasePath, { multidevice });
   fillMissingAttachmentKinds(tables);
+
+  if (multidevice) {
+    const nowStr = new Date().toISOString();
+
+    const deviceProjectMappings = [];
+    for (const project of tables.projects) {
+      if (project.workspace_path) {
+        deviceProjectMappings.push({
+          device_id: initialDeviceId,
+          project_id: project.id,
+          workspace_path: project.workspace_path,
+          created_at: nowStr,
+          updated_at: nowStr,
+        });
+      }
+    }
+
+    const deviceTaskWorktrees = [];
+    for (const task of tables.tasks) {
+      if (task.worktree_path) {
+        deviceTaskWorktrees.push({
+          device_id: initialDeviceId,
+          task_id: task.id,
+          worktree_path: task.worktree_path,
+          worktree_branch: task.worktree_branch ?? null,
+          created_at: nowStr,
+          updated_at: nowStr,
+        });
+      }
+    }
+
+    const hasLocalMappings = deviceProjectMappings.length > 0 || deviceTaskWorktrees.length > 0;
+    const randomHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
+    const initialPairingCode = "INIT" + Math.floor(10 + Math.random() * 90);
+    const pairingExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const devices = hasLocalMappings
+      ? [{
+          id: initialDeviceId,
+          name: initialDeviceName,
+          token_hash: randomHash,
+          status: "pending_pairing",
+          last_heartbeat_at: null,
+          last_status: JSON.stringify({ isRunning: false, currentTaskId: null }),
+          created_at: nowStr,
+          updated_at: nowStr,
+        }]
+      : [];
+
+    const devicePairingCodes = hasLocalMappings
+      ? [{
+          code: initialPairingCode,
+          device_name: initialDeviceName,
+          device_token: null,
+          status: "pending",
+          expires_at: pairingExpiresAt,
+          created_at: nowStr,
+          approved_at: null,
+          device_id: initialDeviceId,
+        }]
+      : [];
+
+    tables.devices = devices;
+    tables.device_pairing_codes = devicePairingCodes;
+    tables.device_project_mappings = deviceProjectMappings;
+    tables.device_task_worktrees = deviceTaskWorktrees;
+    tables.device_automations = tables.device_automations ?? [];
+    tables.task_activities = tables.task_activities ?? [];
+    tables.project_readme_attachments = tables.project_readme_attachments ?? [];
+  }
+
   tables.projects = projectRowsWithLabels(tables).map((project) => ({
     ...project,
     workspace_path: null,
@@ -370,6 +494,9 @@ const CLOUD_COLUMNS = {
     "due_date", "recurrence_interval", "recurrence_unit", "archived_at", "version",
     "created_at", "updated_at",
   ],
+  task_activities: [
+    "id", "task_id", "actor_type", "actor_id", "actor_name", "actor_avatar_url", "changes", "created_at",
+  ],
   comments: [
     "id", "task_id", "body", "thread_id", "thread_codex_project_id",
     "thread_codex_project_kind", "thread_codex_host_id", "thread_workspace_path",
@@ -380,6 +507,24 @@ const CLOUD_COLUMNS = {
   attachments: [
     "id", "task_id", "comment_id", "kind", "filename", "content_type", "size", "created_at",
     "change_revision",
+  ],
+  project_readme_attachments: [
+    "id", "project_id", "filename", "content_type", "size", "created_at",
+  ],
+  devices: [
+    "id", "name", "token_hash", "status", "last_heartbeat_at", "last_status", "created_at", "updated_at",
+  ],
+  device_pairing_codes: [
+    "code", "device_name", "device_token", "status", "expires_at", "created_at", "approved_at", "device_id",
+  ],
+  device_project_mappings: [
+    "device_id", "project_id", "workspace_path", "created_at", "updated_at",
+  ],
+  device_task_worktrees: [
+    "device_id", "task_id", "worktree_path", "worktree_branch", "created_at", "updated_at",
+  ],
+  device_automations: [
+    "device_id", "project_id", "enabled_by_user", "quota_aware", "interval_minutes", "model", "reasoning_effort", "created_at", "updated_at",
   ],
 };
 
@@ -398,19 +543,27 @@ function cloudTaskRow(task) {
 
 function cloudRows(table, tables) {
   if (table === "projects") return projectRowsWithLabels(tables);
-  return table === "tasks" ? tables.tasks.map(cloudTaskRow) : tables[table];
+  if (table === "tasks") return tables.tasks.map(cloudTaskRow);
+  return tables[table] ?? [];
 }
 
 function insertTableSql(table) {
   const columns = CLOUD_COLUMNS[table];
-  const operation = table === "projects" ? "INSERT OR REPLACE" : "INSERT";
+  const operation = (
+    table === "projects"
+    || table === "devices"
+    || table === "device_project_mappings"
+    || table === "device_task_worktrees"
+    || table === "device_automations"
+  ) ? "INSERT OR REPLACE" : "INSERT";
   return `${operation} INTO "${table}" (${columns.map((column) => `"${column}"`).join(", ")})
        SELECT ${columns.map((column) => `json_extract(value, '$.${column}')`).join(", ")}
        FROM json_each(?)`;
 }
 
 export function createCloudD1ImportPlan(tables) {
-  return TABLE_ORDER.map((table) => {
+  const tableOrder = getTableOrder(tables);
+  return tableOrder.map((table) => {
     const columns = CLOUD_COLUMNS[table];
     const values = cloudRows(table, tables).map((row) => (
       Object.fromEntries(columns.map((column) => [
@@ -556,7 +709,7 @@ export function createCloudBindingMigrationAdapters({ d1, r2 }) {
         const result = await d1.prepare(CLOUD_PROJECT_COUNTS_SQL).all();
         return Object.fromEntries(result.results.map((row) => [
           row.project_id,
-          Object.fromEntries(TABLE_ORDER.map((table) => [table, Number(row[table])])),
+          Object.fromEntries(COUNTED_TABLES.map((table) => [table, Number(row[table])])),
         ]));
       },
       async listProjectReadmes() {
@@ -608,7 +761,7 @@ export async function importCloudMigrationBundle(bundle, { d1, r2 }) {
   const localCounts = existingCounts.local;
   const hasOnlyGlobalBaseline = existingProjects.length === 1
     && existingProjects[0] === "local"
-    && TABLE_ORDER.every((table) => (
+    && COUNTED_TABLES.every((table) => (
       Number(localCounts?.[table]) === (table === "projects" ? 1 : 0)
     ));
   if (existingProjects.length > 0 && !hasOnlyGlobalBaseline) {
@@ -683,8 +836,9 @@ export async function writeCloudMigrationBundle(bundle, outputDirectory) {
     await mkdir(dataDirectory, { mode: 0o700 });
     await mkdir(attachmentsDirectory, { mode: 0o700 });
 
+    const tableOrder = getTableOrder(bundle);
     const tableFiles = {};
-    for (const table of TABLE_ORDER) {
+    for (const table of tableOrder) {
       const relativePath = `data/${table}.json`;
       await writePrivateFile(
         bundleFile(outputDirectory, relativePath),
@@ -748,8 +902,9 @@ export async function readCloudMigrationBundle(inputDirectory) {
     throw new Error(`Unsupported cloud migration schema version '${manifest.schemaVersion}'`);
   }
 
+  const tableOrder = getTableOrder(manifest);
   const tables = {};
-  for (const table of TABLE_ORDER) {
+  for (const table of tableOrder) {
     const entry = manifest.tables?.[table];
     if (!entry?.file) throw new Error(`Cloud migration manifest is missing table '${table}'`);
     const rows = await readJsonFile(
@@ -833,12 +988,15 @@ export async function runCli(
   if (command === "export") {
     const options = parseOptions(
       args,
-      new Set(["database", "attachments", "output"]),
+      new Set(["database", "attachments", "output", "multidevice", "deviceId", "deviceName"]),
       ["database", "attachments", "output"],
     );
     const bundle = await createCloudMigrationBundle({
       databasePath: options.database,
       attachmentsDirectory: options.attachments,
+      multidevice: options.multidevice === "true" || options.multidevice === "1",
+      initialDeviceId: options.deviceId ?? "local-device",
+      initialDeviceName: options.deviceName ?? "Migrated Computer",
     });
     const output = await writeCloudMigrationBundle(bundle, options.output);
     stdout.write(`${JSON.stringify({ output, counts: bundle.counts })}\n`);

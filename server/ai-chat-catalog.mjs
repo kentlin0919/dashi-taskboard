@@ -337,7 +337,7 @@ function sanitizeModels(value) {
   });
 }
 
-function sanitizeAppServerModels(value) {
+export function sanitizeAppServerModels(value) {
   if (!Array.isArray(value)) throw new Error("Codex returned an invalid model catalog");
   return value.flatMap((model) => {
     if (

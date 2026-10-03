@@ -136,7 +136,10 @@ export class CodexAppServer {
         }).then(() => {
           this.#sendNotification(child, "initialized");
           resolve(child);
-        }, reject);
+        }, (error) => {
+          this.#handleExit(child, error);
+          reject(error);
+        });
       });
     }).finally(() => {
       if (this.starting === starting) this.starting = null;

@@ -2103,12 +2103,17 @@ export function createTaskboardServer(options = {}) {
           "codexProjectKind",
           "codexHostId",
           "workspacePath",
+          "scope",
         ]), "GET /api/local/ai/catalog");
+        const scope = url.searchParams.get("scope") ?? "full";
+        if (scope !== "full" && scope !== "models") {
+          throw new ApiError(400, "INVALID_SCOPE", "Catalog scope must be full or models");
+        }
         const projectId = validateProjectId(url.searchParams.get("projectId") ?? undefined);
         return sendJson(
           response,
           200,
-          await aiChat.getCatalog(projectId, undefined, aiExecutionTargetFromQuery(url.searchParams)),
+          await aiChat.getCatalog(projectId, undefined, aiExecutionTargetFromQuery(url.searchParams), scope),
         );
       }
 

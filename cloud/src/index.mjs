@@ -29,7 +29,10 @@ import {
   slugify,
   parseProjectLabel,
 } from "../../shared/api-fields.mjs";
-import { DurableObject } from "cloudflare:workers";
+
+const BaseDurableObject = typeof DurableObject !== "undefined"
+  ? DurableObject
+  : class {};
 
 import { DEFAULT_LABEL_NAMES, TASK_STATUSES, TASK_PRIORITIES } from "../../shared/domain.mjs";
 
@@ -51,8 +54,36 @@ const REALTIME_HUB_NAME = "global";
 const SESSION_COOKIE_NAME = "__Host-taskboard_session";
 const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 const TASK_TREE_MAX_NODES = 1_000;
+const SITE_MIGRATION_TABLE_COLUMNS = {
+  projects: ["id", "name", "workspace_path", "labels", "next_task_number", "created_at", "updated_at"],
+  project_readmes: ["project_id", "content", "version", "created_at", "updated_at"],
+  tasks: [
+    "id", "identifier", "project_id", "title", "description", "status", "priority", "labels",
+    "sort_order", "thread_id", "thread_codex_project_id", "thread_codex_project_kind",
+    "thread_codex_host_id", "thread_workspace_path", "creator_type", "creator_id", "creator_name",
+    "creator_avatar_url", "assignee_type", "assignee_id", "assignee_name", "assignee_avatar_url",
+    "development_context_type", "development_branch", "start_date", "due_date",
+    "recurrence_interval", "recurrence_unit", "archived_at", "version", "agent_session",
+    "created_at", "updated_at",
+  ],
+  task_activities: ["id", "task_id", "actor_type", "actor_id", "actor_name", "actor_avatar_url", "changes", "created_at"],
+  comments: [
+    "id", "task_id", "body", "thread_id", "thread_codex_project_id", "thread_codex_project_kind",
+    "thread_codex_host_id", "thread_workspace_path", "author_type", "author_id", "author_name",
+    "author_avatar_url", "version", "created_at", "updated_at", "agent_session", "change_revision",
+  ],
+  task_relations: ["relation_type", "source_task_id", "target_task_id", "created_at", "origin"],
+  attachments: ["id", "task_id", "comment_id", "kind", "filename", "content_type", "size", "created_at", "change_revision", "body_fallback"],
+  project_readme_attachments: ["id", "project_id", "filename", "content_type", "size", "created_at"],
+  devices: ["id", "name", "token_hash", "status", "last_heartbeat_at", "last_status", "created_at", "updated_at"],
+  device_pairing_codes: ["code", "device_name", "device_token", "status", "expires_at", "created_at", "approved_at", "device_id"],
+  device_project_mappings: ["device_id", "project_id", "workspace_path", "created_at", "updated_at"],
+  device_task_worktrees: ["device_id", "task_id", "worktree_path", "worktree_branch", "created_at", "updated_at"],
+  device_automations: ["device_id", "project_id", "enabled_by_user", "quota_aware", "interval_minutes", "model", "reasoning_effort", "created_at", "updated_at"],
+};
+const SITE_MIGRATION_TABLE_ORDER = Object.keys(SITE_MIGRATION_TABLE_COLUMNS);
 
-export class RealtimeHub extends DurableObject {
+export class RealtimeHub extends BaseDurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/connect") {
@@ -94,7 +125,7 @@ export class RealtimeHub extends DurableObject {
         });
       }
       const message = JSON.stringify({ type: "revision", revision: payload.revision });
-      for (const socket of this.ctx.getWebSockets()) {
+      for (const socket of (this.ctx?.getWebSockets?.() ?? [])) {
         try {
           socket.send(message);
         } catch {
@@ -280,15 +311,68 @@ async function decodeSessionUsername(request, sharedSecret) {
   }
 }
 
+async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function unauthorized() {
   return json(
     401,
-    { error: { code: "UNAUTHORIZED", message: "Valid Basic credentials are required" } },
+    { error: { code: "UNAUTHORIZED", message: "Valid credentials are required" } },
     { "www-authenticate": 'Basic realm="Codex Taskboard", charset="UTF-8"' },
   );
 }
 
 async function authenticate(request, env) {
+  const authHeader = request.headers.get("authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7).trim();
+    if (!token || !env.DB) return null;
+    const tokenHash = await sha256Hex(token);
+    const device = await env.DB.prepare(
+      "SELECT id, name, status FROM devices WHERE token_hash = ?"
+    ).bind(tokenHash).first();
+    if (!device || device.status !== "active") return null;
+    return {
+      actor: {
+        type: "agent",
+        id: `device:${device.id}`,
+        name: `${device.name} (Device)`,
+        avatarUrl: null,
+        username: device.name,
+        deviceId: device.id,
+      },
+      sessionCookie: null,
+      isDevice: true,
+    };
+  }
+
+  const siteUserId = request.headers.get("oai-authenticated-user-id");
+  if (env.TASKBOARD_SITES_AUTH_ENABLED === "1" && siteUserId) {
+    const email = request.headers.get("oai-authenticated-user-email")?.trim() ?? "";
+    const username = email || siteUserId;
+    const userId = `sites:${encodeURIComponent(siteUserId)}`;
+    const actor = request.headers.get("x-taskboard-client") === "taskctl"
+      ? {
+          type: "agent",
+          id: `${userId}:codex-agent`,
+          name: `Codex Agent (${username})`,
+          avatarUrl: null,
+          username,
+        }
+      : {
+          type: "user",
+          id: userId,
+          name: username,
+          avatarUrl: null,
+          username,
+        };
+    return { actor, sessionCookie: null };
+  }
+
   if (typeof env.TASKBOARD_SHARED_SECRET !== "string" || env.TASKBOARD_SHARED_SECRET === "") {
     throw new ApiError(
       500,
@@ -296,7 +380,7 @@ async function authenticate(request, env) {
       "TASKBOARD_SHARED_SECRET is not configured",
     );
   }
-  const credentials = decodeBasicCredentials(request.headers.get("authorization"));
+  const credentials = decodeBasicCredentials(authHeader);
   let username;
   let sessionCookie = null;
   if (credentials) {
@@ -2414,11 +2498,14 @@ async function readGlobalRevision(env) {
 }
 
 function realtimeHub(env) {
+  if (!env.REALTIME_HUB) return null;
   return env.REALTIME_HUB.get(env.REALTIME_HUB.idFromName(REALTIME_HUB_NAME));
 }
 
 async function broadcastRevision(env, revision) {
-  const response = await realtimeHub(env).fetch("https://realtime.internal/broadcast", {
+  const hub = realtimeHub(env);
+  if (!hub) return;
+  const response = await hub.fetch("https://realtime.internal/broadcast", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ revision }),
@@ -2460,31 +2547,657 @@ async function attachmentContent(env, id, request, download = false) {
   });
 }
 
+async function requestDevicePairingCode(request, env) {
+  const body = await readJson(request);
+  const deviceName = stringField(body.deviceName, "deviceName", { required: true, maxLength: 100 });
+  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+  let code = "";
+  const randomBytes = new Uint8Array(6);
+  crypto.getRandomValues(randomBytes);
+  for (let i = 0; i < 6; i++) {
+    code += chars[randomBytes[i] % chars.length];
+  }
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const createdAt = now();
+  await env.DB.prepare(`
+    INSERT INTO device_pairing_codes (code, device_name, status, expires_at, created_at, device_id)
+    VALUES (?, ?, 'pending', ?, ?, (
+      SELECT CASE WHEN COUNT(*) = 1 THEN MAX(d.id) END
+      FROM devices d
+      WHERE d.name = ?
+        AND d.status = 'pending_pairing'
+        AND NOT EXISTS (
+          SELECT 1 FROM device_pairing_codes p
+          WHERE p.device_id = d.id
+            AND p.status IN ('pending', 'approved')
+            AND p.expires_at > ?
+        )
+    ))
+  `).bind(code, deviceName, expiresAt, createdAt, deviceName, createdAt).run();
+  return json(200, { code, pairingCode: code, deviceName, expiresAt });
+}
+
+async function claimDevicePairingToken(request, env) {
+  const body = await readJson(request);
+  const code = stringField(body.code ?? body.pairingCode, "code", { required: true, maxLength: 50 }).toUpperCase();
+  const row = await env.DB.prepare(`
+    SELECT code, device_name, device_token, status, expires_at, device_id
+    FROM device_pairing_codes WHERE code = ?
+  `).bind(code).first();
+  if (!row) {
+    throw new ApiError(404, "NOT_FOUND", "Pairing code not found");
+  }
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    throw new ApiError(400, "EXPIRED", "Pairing code has expired");
+  }
+  if (row.status === "pending") {
+    return json(200, { status: "pending" });
+  }
+  if (row.status === "rejected") {
+    return json(200, { status: "rejected" });
+  }
+  if (row.status === "approved" && row.device_token && row.device_id) {
+    const updateResult = await env.DB.prepare(`
+      UPDATE device_pairing_codes
+      SET status = 'consumed', device_token = NULL
+      WHERE code = ? AND status = 'approved' AND device_token IS NOT NULL
+    `).bind(code).run();
+    const changes = updateResult.meta?.changes ?? updateResult.changes ?? 0;
+    if (changes === 0) {
+      throw new ApiError(400, "ALREADY_CONSUMED", "Pairing code has already been consumed");
+    }
+    return json(200, {
+      status: "approved",
+      deviceId: row.device_id,
+      deviceToken: row.device_token,
+      deviceName: row.device_name,
+      siteAuthorizationToken: env.TASKBOARD_SITE_BYPASS_TOKEN ?? null,
+    });
+  }
+  throw new ApiError(400, "INVALID_STATE", "Pairing code has already been consumed or is invalid");
+}
+
+async function listPendingPairingRequests(env) {
+  const result = await env.DB.prepare(`
+    SELECT code, code AS pairing_code, code AS pairingCode,
+           device_name AS deviceName, device_name AS device_name,
+           expires_at AS expiresAt, expires_at AS expires_at,
+           created_at AS createdAt, created_at AS created_at
+    FROM device_pairing_codes
+    WHERE status = 'pending' AND expires_at > ?
+    ORDER BY created_at DESC
+  `).bind(now()).all();
+  return json(200, { requests: result.results });
+}
+
+async function approveDevicePairing(request, env) {
+  const body = await readJson(request);
+  const code = stringField(body.code ?? body.pairingCode, "code", { required: true, maxLength: 50 }).toUpperCase();
+  const row = await env.DB.prepare(`
+    SELECT code, device_name, status, expires_at, device_id
+    FROM device_pairing_codes WHERE code = ?
+  `).bind(code).first();
+  if (!row) throw new ApiError(404, "NOT_FOUND", "Pairing code not found");
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    throw new ApiError(400, "EXPIRED", "Pairing code has expired");
+  }
+  if (row.status !== "pending") {
+    throw new ApiError(400, "INVALID_STATE", `Pairing code is already ${row.status}`);
+  }
+
+  const targetDeviceId = row.device_id || uuid();
+  const rawTokenBytes = new Uint8Array(32);
+  crypto.getRandomValues(rawTokenBytes);
+  const deviceToken = "dt_" + encodeBase64Url(rawTokenBytes);
+  const tokenHash = await sha256Hex(deviceToken);
+  const createdAt = now();
+
+  const existingDevice = await env.DB.prepare("SELECT id FROM devices WHERE id = ?").bind(targetDeviceId).first();
+  if (existingDevice) {
+    await env.DB.prepare(`
+      UPDATE devices
+      SET token_hash = ?, status = 'active', updated_at = ?
+      WHERE id = ?
+    `).bind(tokenHash, createdAt, targetDeviceId).run();
+  } else {
+    await env.DB.prepare(`
+      INSERT INTO devices (id, name, token_hash, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'active', ?, ?)
+    `).bind(targetDeviceId, row.device_name, tokenHash, createdAt, createdAt).run();
+  }
+
+  const updateResult = await env.DB.prepare(`
+    UPDATE device_pairing_codes
+    SET status = 'approved', approved_at = ?, device_id = ?, device_token = ?
+    WHERE code = ? AND status = 'pending' AND expires_at > ?
+  `).bind(createdAt, targetDeviceId, deviceToken, code, createdAt).run();
+  const changes = updateResult.meta?.changes ?? updateResult.changes ?? 0;
+  if (changes === 0) {
+    if (!existingDevice) {
+      await env.DB.prepare("DELETE FROM devices WHERE id = ?").bind(targetDeviceId).run();
+    }
+    throw new ApiError(400, "INVALID_STATE", "Pairing code could not be approved or was already processed");
+  }
+
+  return json(200, { ok: true, success: true, deviceId: targetDeviceId, deviceName: row.device_name });
+}
+
+async function rejectDevicePairing(request, env) {
+  const body = await readJson(request);
+  const code = stringField(body.code ?? body.pairingCode, "code", { required: true, maxLength: 50 }).toUpperCase();
+  await env.DB.prepare(`
+    UPDATE device_pairing_codes SET status = 'rejected' WHERE code = ?
+  `).bind(code).run();
+  return json(200, { ok: true, success: true });
+}
+
+async function listDevices(env) {
+  const result = await env.DB.prepare(`
+    SELECT id, name, status, last_heartbeat_at AS lastHeartbeatAt, last_status AS lastStatus, created_at AS createdAt, updated_at AS updatedAt
+    FROM devices ORDER BY created_at DESC
+  `).all();
+  const devices = result.results.map((row) => {
+    let statusObj = null;
+    if (row.lastStatus) {
+      try { statusObj = typeof row.lastStatus === "string" ? JSON.parse(row.lastStatus) : row.lastStatus; } catch {}
+    }
+    return {
+      id: row.id,
+      name: row.name,
+      status: row.status,
+      lastHeartbeatAt: row.lastHeartbeatAt,
+      last_heartbeat_at: row.lastHeartbeatAt,
+      lastStatus: statusObj,
+      last_status: statusObj,
+      createdAt: row.createdAt,
+      created_at: row.createdAt,
+      updatedAt: row.updatedAt,
+      updated_at: row.updatedAt,
+    };
+  });
+  return json(200, { devices });
+}
+
+async function revokeDevice(deviceId, env) {
+  const timestamp = now();
+  await env.DB.prepare(`
+    UPDATE devices SET status = 'revoked', updated_at = ? WHERE id = ?
+  `).bind(timestamp, deviceId).run();
+  return json(200, { ok: true });
+}
+
+async function recordDeviceHeartbeat(deviceId, request, env, actor) {
+  if (actor.deviceId && actor.deviceId !== deviceId) {
+    throw new ApiError(403, "FORBIDDEN", "Device cannot send heartbeat for another device");
+  }
+  let body = {};
+  try {
+    body = await readJson(request);
+  } catch {}
+  const statusPayload = body.ping
+    ? null
+    : body.status ?? (
+    body.isRunning !== undefined
+      ? { isRunning: Boolean(body.isRunning), currentTaskId: body.currentTaskId ?? null }
+      : null
+  );
+  const statusJson = statusPayload ? JSON.stringify(statusPayload) : null;
+  const timestamp = now();
+  await env.DB.prepare(`
+    UPDATE devices SET last_heartbeat_at = ?, last_status = COALESCE(?, last_status), updated_at = ?
+    WHERE id = ?
+  `).bind(timestamp, statusJson, timestamp, deviceId).run();
+
+  const automationsResult = await env.DB.prepare(`
+    SELECT a.project_id AS projectId, a.enabled_by_user AS enabledByUser, a.quota_aware AS quotaAware,
+           a.interval_minutes AS intervalMinutes, a.model, a.reasoning_effort AS reasoningEffort,
+           m.workspace_path AS workspacePath
+    FROM device_automations a
+    LEFT JOIN device_project_mappings m ON a.device_id = m.device_id AND a.project_id = m.project_id
+    WHERE a.device_id = ?
+  `).bind(deviceId).all();
+
+  const automations = automationsResult.results.map((row) => ({
+    projectId: row.projectId,
+    enabledByUser: Boolean(row.enabledByUser),
+    quotaAware: Boolean(row.quotaAware),
+    intervalMinutes: row.intervalMinutes,
+    model: row.model,
+    reasoningEffort: row.reasoningEffort,
+    workspacePath: row.workspacePath ?? null,
+  }));
+
+  return json(200, { ok: true, deviceId, automations });
+}
+
+async function listProjectDeviceAutomations(projectId, env) {
+  validateProjectId(projectId);
+  const result = await env.DB.prepare(`
+    SELECT d.id AS deviceId, d.name AS deviceName, d.status AS deviceStatus,
+           d.last_heartbeat_at AS lastHeartbeatAt, d.last_status AS lastStatus,
+           COALESCE(a.enabled_by_user, 0) AS enabledByUser,
+           COALESCE(a.quota_aware, 0) AS quotaAware,
+           COALESCE(a.interval_minutes, 5) AS intervalMinutes,
+           COALESCE(a.model, '') AS model,
+           COALESCE(a.reasoning_effort, '') AS reasoningEffort,
+           m.workspace_path AS workspacePath
+    FROM devices d
+    LEFT JOIN device_automations a ON d.id = a.device_id AND a.project_id = ?
+    LEFT JOIN device_project_mappings m ON d.id = m.device_id AND m.project_id = ?
+    WHERE d.status = 'active'
+    ORDER BY d.created_at ASC
+  `).bind(projectId, projectId).all();
+
+  const automations = result.results.map((row) => {
+    let lastStatus = null;
+    if (row.lastStatus) {
+      try { lastStatus = JSON.parse(row.lastStatus); } catch {}
+    }
+    return {
+      deviceId: row.deviceId,
+      deviceName: row.deviceName,
+      deviceStatus: row.deviceStatus,
+      lastHeartbeatAt: row.lastHeartbeatAt,
+      lastStatus,
+      enabledByUser: Boolean(row.enabledByUser),
+      quotaAware: Boolean(row.quotaAware),
+      intervalMinutes: row.intervalMinutes,
+      model: row.model,
+      reasoningEffort: row.reasoningEffort,
+      workspacePath: row.workspacePath ?? null,
+    };
+  });
+  return json(200, { automations });
+}
+
+async function saveProjectDeviceAutomation(projectId, deviceId, request, env) {
+  validateProjectId(projectId);
+  const body = await readJson(request);
+  const enabledByUser = body.enabledByUser ? 1 : 0;
+  const quotaAware = body.quotaAware ? 1 : 0;
+  const intervalMinutes = [5, 10, 15, 30, 60].includes(body.intervalMinutes) ? body.intervalMinutes : 5;
+  const model = stringField(body.model ?? "", "model", { maxLength: 256 });
+  const reasoningEffort = stringField(body.reasoningEffort ?? "", "reasoningEffort", { maxLength: 100 });
+  const timestamp = now();
+
+  const statements = [
+    env.DB.prepare(`
+      INSERT INTO device_automations (device_id, project_id, enabled_by_user, quota_aware, interval_minutes, model, reasoning_effort, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (device_id, project_id) DO UPDATE SET
+        enabled_by_user = excluded.enabled_by_user,
+        quota_aware = excluded.quota_aware,
+        interval_minutes = excluded.interval_minutes,
+        model = excluded.model,
+        reasoning_effort = excluded.reasoning_effort,
+        updated_at = excluded.updated_at
+    `).bind(deviceId, projectId, enabledByUser, quotaAware, intervalMinutes, model, reasoningEffort, timestamp, timestamp),
+  ];
+
+  if (typeof body.workspacePath === "string") {
+    statements.push(
+      env.DB.prepare(`
+        INSERT INTO device_project_mappings (device_id, project_id, workspace_path, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (device_id, project_id) DO UPDATE SET
+          workspace_path = excluded.workspace_path,
+          updated_at = excluded.updated_at
+      `).bind(deviceId, projectId, body.workspacePath, timestamp, timestamp)
+    );
+  }
+
+  await env.DB.batch(statements);
+  return json(200, { ok: true });
+}
+
+function normalizeSiteMigrationTaskRow(task) {
+  const {
+    git_branch,
+    worktree_branch,
+    worktree_path,
+    external_id,
+    external_key,
+    external_origin,
+    external_source,
+    external_url,
+    ...row
+  } = task;
+  if ([external_id, external_key, external_origin, external_source, external_url].some((value) => value != null)) {
+    throw new ApiError(400, "UNSUPPORTED_TASK_EXTERNAL_METADATA", "Task external metadata cannot be migrated to this Site schema");
+  }
+  if (worktree_path != null) {
+    throw new ApiError(400, "DEVICE_PATH_IN_MIGRATION", "Task worktree paths must be stored only in device mappings");
+  }
+  if (Object.hasOwn(task, "git_branch") || Object.hasOwn(task, "worktree_branch")) {
+    const isWorktree = worktree_branch != null;
+    row.development_context_type = isWorktree
+      ? "worktree"
+      : git_branch != null
+        ? "branch"
+        : null;
+    row.development_branch = isWorktree ? worktree_branch : git_branch ?? null;
+  }
+  return row;
+}
+
+async function importSiteMigration(request, env) {
+  if (env.TASKBOARD_MIGRATION_ENABLED !== "1") {
+    throw new ApiError(404, "NOT_FOUND", "Resource not found");
+  }
+  const rawBody = await request.text();
+  if (new TextEncoder().encode(rawBody).byteLength > 12 * 1024 * 1024) {
+    throw new ApiError(413, "BODY_TOO_LARGE", "Migration bundle cannot exceed 12 MiB");
+  }
+  let bundle;
+  try {
+    bundle = JSON.parse(rawBody);
+  } catch {
+    throw new ApiError(400, "INVALID_JSON", "Migration bundle is not valid JSON");
+  }
+  assertPlainObject(bundle, "Migration bundle");
+  if (bundle.schemaVersion !== 2) {
+    throw new ApiError(400, "UNSUPPORTED_MIGRATION_SCHEMA", "Taskboard migration bundle version is not supported");
+  }
+  const sourceTables = bundle.tables;
+  const tables = sourceTables && typeof sourceTables === "object" && !Array.isArray(sourceTables)
+    ? {
+        ...sourceTables,
+        tasks: Array.isArray(sourceTables.tasks)
+          ? sourceTables.tasks.map((task) => {
+              assertPlainObject(task, "Migration row in tasks");
+              return normalizeSiteMigrationTaskRow(task);
+            })
+          : sourceTables.tasks,
+      }
+    : sourceTables;
+  assertPlainObject(tables, "Migration tables");
+  if (
+    Object.keys(tables).length !== SITE_MIGRATION_TABLE_ORDER.length
+    || SITE_MIGRATION_TABLE_ORDER.some((table) => !Array.isArray(tables[table]))
+  ) {
+    throw new ApiError(400, "INVALID_MIGRATION_TABLES", "Migration bundle does not match the supported Taskboard schema");
+  }
+  for (const table of SITE_MIGRATION_TABLE_ORDER) {
+    const columns = SITE_MIGRATION_TABLE_COLUMNS[table];
+    for (const row of tables[table]) {
+      assertPlainObject(row, `Migration row in ${table}`);
+      if (Object.keys(row).some((column) => !columns.includes(column))) {
+        throw new ApiError(400, "INVALID_MIGRATION_ROW", `Migration row contains an unknown ${table} column`);
+      }
+      if (Object.values(row).some((value) => (
+        value !== null
+        && typeof value !== "string"
+        && !(typeof value === "number" && Number.isFinite(value))
+      ))) {
+        throw new ApiError(400, "INVALID_MIGRATION_ROW", `Migration row in ${table} contains an unsupported value`);
+      }
+    }
+  }
+  if (tables.projects.some((project) => project.workspace_path != null)) {
+    throw new ApiError(400, "DEVICE_PATH_IN_MIGRATION", "Project workspace paths must be stored only in device mappings");
+  }
+
+  const migrationId = "initial-local-data";
+  const bundleSha256 = await sha256Hex(rawBody);
+  const priorRun = await env.DB.prepare(
+    "SELECT bundle_sha256 FROM site_migration_runs WHERE id = ?",
+  ).bind(migrationId).first();
+  if (priorRun) {
+    if (priorRun.bundle_sha256 !== bundleSha256) {
+      throw new ApiError(409, "MIGRATION_ALREADY_COMPLETED", "A different initial data migration has already completed");
+    }
+    return json(200, { status: "already_imported", bundleSha256 });
+  }
+
+  for (const table of SITE_MIGRATION_TABLE_ORDER) {
+    const count = await env.DB.prepare(`SELECT COUNT(*) AS count FROM "${table}"`).first("count");
+    if (Number(count) !== 0) {
+      throw new ApiError(409, "MIGRATION_TARGET_NOT_EMPTY", `The target table '${table}' is not empty`);
+    }
+  }
+
+  const attachmentRows = new Map(tables.attachments.map((row) => [row.id, row]));
+  const taskProjects = new Map(tables.tasks.map((task) => [task.id, task.project_id]));
+  const attachments = bundle.attachments;
+  if (!Array.isArray(attachments) || attachments.length !== attachmentRows.size) {
+    throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENTS", "Migration attachment metadata and payload counts do not match");
+  }
+  const attachmentPayloads = new Map();
+  for (const attachment of attachments) {
+    assertPlainObject(attachment, "Migration attachment");
+    if (
+      typeof attachment.id !== "string"
+      || attachment.objectKey !== attachment.id
+      || typeof attachment.sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(attachment.sha256)
+      || typeof attachment.bodyBase64 !== "string"
+      || attachment.bodyBase64.length > 35_000_000
+      || attachmentPayloads.has(attachment.id)
+    ) {
+      throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENT", "Migration attachment is invalid");
+    }
+    const row = attachmentRows.get(attachment.id);
+    if (
+      !row
+      || Number(row.size) !== Number(attachment.size)
+      || Number(attachment.size) > ATTACHMENT_BODY_LIMIT
+      || attachment.projectId !== taskProjects.get(row.task_id)
+    ) {
+      throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENT", "Migration attachment size does not match its metadata");
+    }
+    let body;
+    try {
+      const binary = atob(attachment.bodyBase64);
+      body = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    } catch {
+      throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENT", "Migration attachment data is invalid");
+    }
+    const digest = await crypto.subtle.digest("SHA-256", body);
+    const digestHex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    if (body.byteLength !== Number(attachment.size) || digestHex !== attachment.sha256) {
+      throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENT", "Migration attachment hash verification failed");
+    }
+    attachmentPayloads.set(attachment.id, { row, attachment, body });
+  }
+
+  const uploadedKeys = [];
+  let d1Committed = false;
+  try {
+    for (const [id, { row, attachment, body }] of attachmentPayloads) {
+      const existing = await env.ATTACHMENTS.head(id);
+      if (existing) {
+        if (
+          Number(existing.size) !== body.byteLength
+          || existing.customMetadata?.sha256 !== attachment.sha256
+        ) {
+          throw new ApiError(409, "MIGRATION_ATTACHMENT_CONFLICT", `Attachment '${id}' already exists with different bytes`);
+        }
+        continue;
+      }
+      await env.ATTACHMENTS.put(id, body, {
+        customMetadata: { sha256: attachment.sha256 },
+        httpMetadata: { contentType: row.content_type },
+      });
+      uploadedKeys.push(id);
+    }
+
+    const statements = [];
+    for (const table of SITE_MIGRATION_TABLE_ORDER) {
+      const columns = SITE_MIGRATION_TABLE_COLUMNS[table];
+      let chunk = [];
+      const addChunk = () => {
+        if (chunk.length === 0) return;
+        const sql = `INSERT INTO "${table}" (${columns.map((column) => `"${column}"`).join(", ")}) SELECT ${columns.map((column) => `json_extract(value, '$.${column}')`).join(", ")} FROM json_each(?)`;
+        statements.push(env.DB.prepare(sql).bind(JSON.stringify(chunk)));
+        chunk = [];
+      };
+      for (const row of tables[table]) {
+        const normalized = Object.fromEntries(columns.map((column) => [
+          column,
+          column === "change_revision" ? row[column] ?? 0 : row[column] ?? null,
+        ]));
+        const nextChunk = [...chunk, normalized];
+        if (new TextEncoder().encode(JSON.stringify(nextChunk)).byteLength > 80_000) {
+          if (chunk.length === 0) {
+            throw new ApiError(413, "MIGRATION_ROW_TOO_LARGE", `A row in '${table}' exceeds the D1 batch limit`);
+          }
+          addChunk();
+          chunk.push(normalized);
+        } else {
+          chunk = nextChunk;
+        }
+      }
+      addChunk();
+    }
+    statements.push(env.DB.prepare(`
+      INSERT INTO site_migration_runs (id, bundle_sha256, created_at)
+      VALUES (?, ?, ?)
+    `).bind(migrationId, bundleSha256, now()));
+
+    const results = await env.DB.batch(statements);
+    d1Committed = true;
+    const tableCounts = {};
+    for (const table of SITE_MIGRATION_TABLE_ORDER) {
+      tableCounts[table] = Number(await env.DB.prepare(`SELECT COUNT(*) AS count FROM "${table}"`).first("count"));
+      if (tableCounts[table] !== tables[table].length) {
+        throw new ApiError(500, "MIGRATION_ROW_COUNT_MISMATCH", `The Taskboard migration row count for '${table}' does not match`);
+      }
+    }
+    return json(200, {
+      status: "imported",
+      bundleSha256,
+      tableCounts,
+      attachments: [...attachmentPayloads].map(([id, value]) => ({
+        id,
+        size: value.body.byteLength,
+        sha256: value.attachment.sha256,
+      })),
+    });
+  } catch (error) {
+    if (!d1Committed) {
+      const cleanup = await Promise.allSettled(uploadedKeys.map((key) => env.ATTACHMENTS.delete(key)));
+      if (cleanup.some((result) => result.status === "rejected")) {
+        console.error("Failed to clean up a Taskboard migration attachment after import failure");
+      }
+    }
+    throw error;
+  }
+}
+
 async function routeApi(request, env, actor, url) {
   const { pathname } = url;
+
+  if (pathname === "/api/admin/migration/import") {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "POST /api/admin/migration/import");
+    if (actor.type !== "user") {
+      throw new ApiError(403, "FORBIDDEN", "Only an authenticated user can import Taskboard data");
+    }
+    return importSiteMigration(request, env);
+  }
+
+  if (actor.deviceId) {
+    if (pathname.startsWith("/api/devices/pair/")) {
+      throw new ApiError(403, "FORBIDDEN", "Device cannot manage pairing requests");
+    }
+    if (pathname === "/api/devices") {
+      throw new ApiError(403, "FORBIDDEN", "Device cannot list devices");
+    }
+    const selfRevokePath = `/api/devices/${encodeURIComponent(actor.deviceId)}/revoke`;
+    if (
+      pathname.match(/^\/api\/devices\/[^/]+(?:\/revoke)?$/)
+      && !pathname.endsWith("/heartbeat")
+      && pathname !== selfRevokePath
+    ) {
+      throw new ApiError(403, "FORBIDDEN", "Device cannot manage other devices");
+    }
+    if (pathname.includes("/devices/automations") || pathname.includes("/automation")) {
+      throw new ApiError(403, "FORBIDDEN", "Device cannot manage automations");
+    }
+  }
 
   if (pathname === "/api/meta") {
     if (request.method !== "GET") methodNotAllowed(["GET"]);
     requireNoQuery(url, "GET /api/meta");
+    const hasRealtime = Boolean(env.REALTIME_HUB);
     return json(200, {
       mode: "cloud",
       manageTaskboardSkillPath: null,
       realtime: {
-        transport: "websocket",
-        endpoint: "/api/events",
+        transport: hasRealtime ? "websocket" : "poll",
+        endpoint: hasRealtime ? "/api/events" : "/api/meta",
       },
       localCapabilities: { available: false },
     });
   }
 
+  if (pathname === "/api/devices/pair/requests") {
+    if (request.method !== "GET") methodNotAllowed(["GET"]);
+    return listPendingPairingRequests(env);
+  }
+
+  if (pathname === "/api/devices/pair/approve") {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    return approveDevicePairing(request, env);
+  }
+
+  if (pathname === "/api/devices/pair/reject") {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    return rejectDevicePairing(request, env);
+  }
+
+  if (pathname === "/api/devices") {
+    if (request.method !== "GET") methodNotAllowed(["GET"]);
+    return listDevices(env);
+  }
+
+  const deviceMatch = pathname.match(/^\/api\/devices\/([^/]+)(?:\/(.*))?$/);
+  if (deviceMatch) {
+    const targetDeviceId = deviceMatch[1];
+    const subRoute = deviceMatch[2] ?? "";
+    if (subRoute === "heartbeat" && request.method === "POST") {
+      return recordDeviceHeartbeat(targetDeviceId, request, env, actor);
+    }
+    if (subRoute === "revoke" && request.method === "POST") {
+      return revokeDevice(targetDeviceId, env);
+    }
+    if (subRoute === "" && request.method === "DELETE") {
+      return revokeDevice(targetDeviceId, env);
+    }
+    methodNotAllowed(["GET", "POST", "DELETE"]);
+  }
+
+  const projectDeviceMatch = pathname.match(/^\/api\/projects\/([^/]+)\/devices(?:\/(.*))?$/);
+  if (projectDeviceMatch) {
+    const targetProjectId = projectDeviceMatch[1];
+    const subRoute = projectDeviceMatch[2] ?? "";
+    if (subRoute === "automations" && request.method === "GET") {
+      return listProjectDeviceAutomations(targetProjectId, env);
+    }
+    const singleDeviceMatch = subRoute.match(/^([^/]+)\/automation$/);
+    if (singleDeviceMatch) {
+      const targetDeviceId = singleDeviceMatch[1];
+      if (request.method === "PUT") {
+        return saveProjectDeviceAutomation(targetProjectId, targetDeviceId, request, env);
+      }
+      methodNotAllowed(["PUT"]);
+    }
+  }
+
   if (pathname === "/api/client-storage") {
     requireNoQuery(url, "/api/client-storage");
+    const hub = realtimeHub(env);
+    if (!hub) {
+      if (request.method === "GET") return json(200, { entries: {} });
+      if (request.method === "PATCH") return empty(204);
+      methodNotAllowed(["GET", "PATCH"]);
+    }
     if (request.method === "GET") {
-      return realtimeHub(env).fetch("https://realtime.internal/client-storage");
+      return hub.fetch("https://realtime.internal/client-storage");
     }
     if (request.method === "PATCH") {
       const update = parseClientStorageUpdate(await readJson(request));
-      const response = await realtimeHub(env).fetch(
+      const response = await hub.fetch(
         "https://realtime.internal/client-storage",
         {
           method: "PATCH",
@@ -2553,6 +3266,9 @@ async function routeApi(request, env, actor, url) {
   if (pathname === "/api/events") {
     if (request.method !== "GET") methodNotAllowed(["GET"]);
     requireNoQuery(url, "GET /api/events");
+    if (!env.REALTIME_HUB) {
+      throw new ApiError(501, "NOT_IMPLEMENTED", "Realtime WebSocket is not available without Durable Objects");
+    }
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       throw new ApiError(426, "WEBSOCKET_REQUIRED", "A WebSocket upgrade is required");
     }
@@ -2866,6 +3582,15 @@ export default {
       if (url.pathname === "/health") {
         if (request.method !== "GET") methodNotAllowed(["GET"]);
         return withSecurityHeaders(json(200, { status: "ok" }));
+      }
+
+      if (url.pathname === "/api/devices/pair/request") {
+        if (request.method !== "POST") methodNotAllowed(["POST"]);
+        return withSecurityHeaders(await requestDevicePairingCode(request, env));
+      }
+      if (url.pathname === "/api/devices/pair/claim") {
+        if (request.method !== "POST") methodNotAllowed(["POST"]);
+        return withSecurityHeaders(await claimDevicePairingToken(request, env));
       }
 
       const authentication = await authenticate(request, env);

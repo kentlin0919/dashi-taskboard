@@ -7,6 +7,7 @@ import { TaskboardIcon } from "./TaskboardIcon";
 import { useTaskboardI18n } from "../i18n";
 import { listenForMenuViewportChange, listenForOutsidePointerDown } from "../menuEvents";
 import type { AiChatModel } from "../types";
+import type { DeviceAutomation } from "../api";
 
 type AutomationStatus = "ACTIVE" | "PAUSED";
 type AutomationQuotaState = "available" | "blocked" | "unknown" | "unavailable";
@@ -33,12 +34,15 @@ interface AutomationState extends AutomationOptions {
 
 interface ProjectAutomationMenuProps {
   automation?: Partial<AutomationState>;
+  deviceAutomations?: DeviceAutomation[];
   models: AiChatModel[];
   pending: boolean;
   error: string | null;
   unavailableReason: string | null;
   onOpen: () => void;
   onChange: (options: AutomationOptions) => void;
+  onDeviceChange?: (deviceId: string, options: AutomationOptions) => void;
+  onOpenDeviceManagement?: () => void;
 }
 
 const EFFORT_LABELS: Record<string, readonly [string, string]> = {
@@ -69,21 +73,60 @@ function automationOptions(
 
 export function ProjectAutomationMenu({
   automation,
+  deviceAutomations,
   models,
   pending,
   error,
   unavailableReason,
   onOpen,
   onChange,
+  onDeviceChange,
+  onOpenDeviceManagement,
 }: ProjectAutomationMenuProps) {
   const { locale, text } = useTaskboardI18n();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const wasPendingRef = useRef(pending);
   const [open, setOpen] = useState(false);
-  const [pickerMenu, setPickerMenu] = useState<"interval" | "model" | "reasoning" | null>(null);
+  const [pickerMenu, setPickerMenu] = useState<"device" | "interval" | "model" | "reasoning" | null>(null);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
-  const [draft, setDraft] = useState<AutomationOptions>(() => automationOptions(models, automation));
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>(
+    () => deviceAutomations?.[0]?.device_id ?? ""
+  );
+
+  const currentDevice = deviceAutomations?.find((d) => d.device_id === selectedDeviceId)
+    ?? deviceAutomations?.[0];
+
+  const [draft, setDraft] = useState<AutomationOptions>(() => {
+    if (currentDevice) {
+      return {
+        enabledByUser: currentDevice.enabled_by_user,
+        quotaAware: currentDevice.quota_aware,
+        intervalMinutes: (currentDevice.interval_minutes as IntervalMinutes) || 5,
+        model: currentDevice.model || models[0]?.slug || "",
+        reasoningEffort: currentDevice.reasoning_effort || "",
+      };
+    }
+    return automationOptions(models, automation);
+  });
+
+  useEffect(() => {
+    if (currentDevice) {
+      setDraft({
+        enabledByUser: currentDevice.enabled_by_user,
+        quotaAware: currentDevice.quota_aware,
+        intervalMinutes: (currentDevice.interval_minutes as IntervalMinutes) || 5,
+        model: currentDevice.model || models[0]?.slug || "",
+        reasoningEffort: currentDevice.reasoning_effort || "",
+      });
+    }
+  }, [currentDevice]);
+
+  const isOnline = currentDevice?.last_heartbeat_at
+    ? Date.now() - new Date(currentDevice.last_heartbeat_at).getTime() < 120_000
+    : false;
+  const isDeviceRunning = Boolean(currentDevice?.last_status?.isRunning);
+
   const status = automation?.status ?? "PAUSED";
   const quota = automation?.quota;
   const idleLabel = automation?.enabledByUser && automation.idleReason === "checking-todos"
@@ -91,24 +134,43 @@ export function ProjectAutomationMenu({
     : automation?.enabledByUser && automation.idleReason === "waiting-todos"
       ? text("等待任务条件", "Waiting for task conditions")
       : null;
-  const stateLabel = idleLabel ?? (!automation?.enabledByUser
-    ? text("已暂停", "Paused")
-    : automation.quotaAware && quota?.state === "blocked"
-      ? text("额度暂停", "Paused by quota")
-      : automation.quotaAware && quota?.state === "unavailable"
-        ? text("额度不可用", "Quota unavailable")
-        : automation.quotaAware && (!quota || quota.state === "unknown")
-          ? text("额度未知", "Quota unknown")
-          : status === "ACTIVE"
-            ? text("运行中", "Running")
-            : text("已暂停", "Paused"));
+
+  const stateLabel = currentDevice
+    ? !currentDevice.enabled_by_user
+      ? text("已暂停", "Paused")
+      : isDeviceRunning
+        ? text("正在执行", "Running")
+        : isOnline
+          ? text(`排程已设定（每 ${currentDevice.interval_minutes} 分钟）`, `Scheduled (${currentDevice.interval_minutes} min)`)
+          : text("设备离线", "Device offline")
+    : (idleLabel ?? (!automation?.enabledByUser
+      ? text("已暂停", "Paused")
+      : automation.quotaAware && quota?.state === "blocked"
+        ? text("额度暂停", "Paused by quota")
+        : automation.quotaAware && quota?.state === "unavailable"
+          ? text("额度不可用", "Quota unavailable")
+          : automation.quotaAware && (!quota || quota.state === "unknown")
+            ? text("额度未知", "Quota unknown")
+            : status === "ACTIVE"
+              ? text("运行中", "Running")
+              : text("已暂停", "Paused")));
   const selectedModel = models.find((model) => model.slug === draft.model) ?? models[0];
   const disabled = pending || !selectedModel || Boolean(unavailableReason);
 
   useEffect(() => {
     if (!open) return;
-    setDraft(automationOptions(models, automation));
-  }, [automation, models, open]);
+    if (currentDevice) {
+      setDraft({
+        enabledByUser: currentDevice.enabled_by_user,
+        quotaAware: currentDevice.quota_aware,
+        intervalMinutes: (currentDevice.interval_minutes as IntervalMinutes) || 5,
+        model: currentDevice.model || models[0]?.slug || "",
+        reasoningEffort: currentDevice.reasoning_effort || "",
+      });
+    } else {
+      setDraft(automationOptions(models, automation));
+    }
+  }, [automation, currentDevice, models, open]);
 
   useEffect(() => {
     if (!open) setPickerMenu(null);
@@ -116,10 +178,12 @@ export function ProjectAutomationMenu({
 
   useEffect(() => {
     if (wasPendingRef.current && !pending) {
-      setDraft(automationOptions(models, automation));
+      if (!currentDevice) {
+        setDraft(automationOptions(models, automation));
+      }
     }
     wasPendingRef.current = pending;
-  }, [automation, pending]);
+  }, [automation, currentDevice, pending]);
 
   useLayoutEffect(() => {
     if (!open || !triggerRef.current || !menuRef.current) return;
@@ -154,7 +218,11 @@ export function ProjectAutomationMenu({
   const submitChange = (next: AutomationOptions) => {
     if (disabled) return;
     setDraft(next);
-    onChange(next);
+    if (currentDevice && onDeviceChange) {
+      onDeviceChange(currentDevice.device_id, next);
+    } else {
+      onChange(next);
+    }
   };
 
   const menu = open ? createPortal(
@@ -167,10 +235,50 @@ export function ProjectAutomationMenu({
     >
       <div className="project-automation-menu-heading">
         <strong>{text("自动认领待办", "Auto-claim tasks")}</strong>
-        <span className={status === "ACTIVE" ? "is-active" : "is-paused"}>
+        <span className={isDeviceRunning || status === "ACTIVE" ? "is-active" : "is-paused"}>
           {stateLabel}
         </span>
       </div>
+
+      {deviceAutomations && deviceAutomations.length > 0 && (
+        <div className="project-automation-field" style={{ marginBottom: 8 }}>
+          <span>{text("执行设备", "Device")}</span>
+          <TaskPropertyPicker
+            value={currentDevice?.device_id ?? ""}
+            options={deviceAutomations.map((d) => ({
+              value: d.device_id,
+              label: d.device_name,
+              icon: <LinearIcon name="terminal" color="currentColor" width={14} height={14} />,
+            }))}
+            open={pickerMenu === "device"}
+            disabled={disabled}
+            className="project-automation-picker"
+            triggerClassName="project-automation-picker-trigger"
+            ariaLabel={text("执行设备", "Device")}
+            onOpenChange={(open) => setPickerMenu(open ? "device" : null)}
+            onChange={(value) => {
+              setSelectedDeviceId(value);
+            }}
+          />
+        </div>
+      )}
+
+      {onOpenDeviceManagement && (
+        <div style={{ marginBottom: 12, textAlign: "right" }}>
+          <button
+            type="button"
+            className="text-button"
+            style={{ fontSize: 12, color: "var(--color-primary, #3b82f6)", cursor: "pointer", background: "none", border: "none", padding: 0 }}
+            onClick={() => {
+              setOpen(false);
+              onOpenDeviceManagement();
+            }}
+          >
+            {text("管理设备与配对...", "Manage devices...")}
+          </button>
+        </div>
+      )}
+
       <div className="project-automation-switch">
         <span>{text("自动认领开关", "Auto-claim")}</span>
         <button

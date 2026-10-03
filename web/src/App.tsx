@@ -45,6 +45,9 @@ import {
   setApiText,
   setCurrentUserActor,
   syncJiraConnection,
+  fetchProjectDeviceAutomations,
+  updateProjectDeviceAutomation,
+  type DeviceAutomation,
   uploadAttachment,
   updateTask as updateTaskRequest,
 } from "./api";
@@ -64,6 +67,7 @@ import { DashboardView } from "./components/DashboardView";
 import { ProjectReadmeView } from "./components/ProjectReadmeView";
 import { IssueListView } from "./components/IssueListView";
 import { JiraConnectionDialog } from "./components/JiraConnectionDialog";
+import { DeviceManagementDialog } from "./components/DeviceManagementDialog";
 import { ArchivedTasksColumn, OtherTasksPanel } from "./components/OtherTasksPanel";
 import {
   type PendingInlineAttachment,
@@ -839,6 +843,37 @@ export function App() {
   const [jiraSaving, setJiraSaving] = useState(false);
   const [jiraSyncing, setJiraSyncing] = useState(false);
   const [jiraError, setJiraError] = useState<string | null>(null);
+  const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
+  const [projectDeviceAutomations, setProjectDeviceAutomations] = useState<DeviceAutomation[]>([]);
+
+  async function refreshDeviceAutomations(projectId: string) {
+    if (!projectId || projectId === ALL_PROJECTS_ID) return;
+    try {
+      const automations = await fetchProjectDeviceAutomations(projectId);
+      setProjectDeviceAutomations(automations);
+    } catch {
+      // 忽略
+    }
+  }
+
+  async function handleDeviceAutomationChange(
+    deviceId: string,
+    options: {
+      enabledByUser: boolean;
+      quotaAware: boolean;
+      intervalMinutes: number;
+      model: string;
+      reasoningEffort: string;
+    }
+  ) {
+    if (!selectedProjectId) return;
+    try {
+      await updateProjectDeviceAutomation(selectedProjectId, deviceId, options);
+      await refreshDeviceAutomations(selectedProjectId);
+    } catch (err: any) {
+      setAnnouncement(text(`更新設備排程失敗：${err.message}`, `Failed to update device automation: ${err.message}`));
+    }
+  }
   const [pendingProjectDelete, setPendingProjectDelete] = useState<ProjectChoice | null>(null);
   const [projectDeleteIssueCount, setProjectDeleteIssueCount] = useState<number | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
@@ -853,6 +888,7 @@ export function App() {
   } | null>(null);
   const [automationCatalogLoading, setAutomationCatalogLoading] = useState(false);
   const [automationCatalogError, setAutomationCatalogError] = useState<string | null>(null);
+  const [automationCatalogRetry, setAutomationCatalogRetry] = useState(0);
   const projectsRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
   const tasksRef = useRef<Task[]>([]);
@@ -964,6 +1000,7 @@ export function App() {
       selectedProject.id,
       controller.signal,
       selectedCodexProjectIdentity,
+      "models",
     ).then(
       (catalog) => {
         if (controller.signal.aborted) return;
@@ -980,6 +1017,7 @@ export function App() {
     );
     return () => controller.abort();
   }, [
+    automationCatalogRetry,
     localAiChatAvailable,
     selectedCodexProjectIdentity?.codexHostId,
     selectedCodexProjectIdentity?.codexProjectId,
@@ -3524,6 +3562,19 @@ export function App() {
                         type="button"
                         role="menuitem"
                         disabled={openingProjectId !== null}
+                        onClick={() => {
+                          setProjectMenuOpen(false);
+                          setProjectContextMenu(null);
+                          setDeviceDialogOpen(true);
+                        }}
+                      >
+                        <LinearIcon name="terminal" className="project-avatar" color="currentColor" width={16} height={16} />
+                        <span>{text("设备管理与配对", "Device Management")}</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={openingProjectId !== null}
                         onClick={openCreateProjectDialog}
                       >
                         <PlusIcon className="project-avatar" color="currentColor" size={16} />
@@ -3542,12 +3593,22 @@ export function App() {
             {selectedProject && (
               <ProjectAutomationMenu
                 automation={selectedProjectAutomation}
+                deviceAutomations={projectDeviceAutomations}
                 models={automationModels}
                 pending={automationPending || automationCatalogLoading}
                 error={automationCatalogError ?? automationError}
                 unavailableReason={automationProjectContext.unavailableReason}
-                onOpen={() => void reconcileProjectAutomation()}
+                onOpen={() => {
+                  if (selectedProjectId) void refreshDeviceAutomations(selectedProjectId);
+                  if (automationCatalogError && !automationCatalogLoading) {
+                    setAutomationCatalogRetry((attempt) => attempt + 1);
+                  } else {
+                    void reconcileProjectAutomation();
+                  }
+                }}
                 onChange={(options) => void saveProjectAutomation(options)}
+                onDeviceChange={handleDeviceAutomationChange}
+                onOpenDeviceManagement={() => setDeviceDialogOpen(true)}
               />
             )}
             {isJiraProject && (
@@ -3998,6 +4059,11 @@ export function App() {
           onSave={saveJiraConnection}
         />
       )}
+
+      <DeviceManagementDialog
+        open={deviceDialogOpen}
+        onClose={() => setDeviceDialogOpen(false)}
+      />
 
       {projectCreateOpen && (
         <div
