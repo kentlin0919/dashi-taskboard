@@ -2077,6 +2077,12 @@ export function createTaskboardServer(options = {}) {
         if ([...url.searchParams.keys()].length > 0) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/meta does not accept query parameters");
         }
+        let cloudMetadata = null;
+        if (capabilityCloudConfig?.remoteUrl) {
+          const upstream = await cloudProxy.forward(new Request("http://127.0.0.1/api/meta"));
+          if (!upstream.ok) return sendFetchResponse(response, upstream);
+          cloudMetadata = await upstream.json();
+        }
         return sendJson(response, 200, {
           ...(configuredTrustedRequest ? {} : { manageTaskboardSkillPath: resolved.skillPath }),
           capabilities: {
@@ -2086,10 +2092,7 @@ export function createTaskboardServer(options = {}) {
           ...(capabilityCloudConfig?.remoteUrl
             ? {
               mode: "cloud",
-              realtime: {
-                transport: "websocket",
-                endpoint: "/api/events",
-              },
+              realtime: cloudMetadata.realtime,
               localCapabilities: { available: !configuredTrustedRequest },
             }
             : {}),

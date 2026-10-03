@@ -2213,8 +2213,17 @@ export function App() {
       },
       onInvalidate: invalidateCloudData,
     });
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void poller.refresh();
+    };
     poller.start();
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("online", refreshWhenVisible);
     return () => {
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("online", refreshWhenVisible);
       controller.abort();
       poller.stop();
     };

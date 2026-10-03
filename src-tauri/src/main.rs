@@ -1947,11 +1947,14 @@ fn open_taskboard(state: &LauncherState) -> Result<(), String> {
 }
 
 fn open_taskboard_in_browser(state: &LauncherState) -> Result<(), String> {
-    let descriptor = fs::read_to_string(state.data_directory.join("launcher-runtime.json"))
+    let config = fs::read_to_string(state.data_directory.join("cloud-companion.json"))
         .map_err(|error| error.to_string())?;
-    let descriptor: LauncherRuntimeDescriptor =
-        serde_json::from_str(&descriptor).map_err(|error| error.to_string())?;
-    let url = format!("{}/", descriptor.url.trim_end_matches('/'));
+    let config: serde_json::Value =
+        serde_json::from_str(&config).map_err(|error| error.to_string())?;
+    let remote_url = config["remoteUrl"]
+        .as_str()
+        .ok_or_else(|| "尚未設定雲端任務面板連線".to_string())?;
+    let url = format!("{}/", remote_url.trim_end_matches('/'));
     #[cfg(target_os = "macos")]
     let status = StdCommand::new("/usr/bin/open")
         .arg(&url)
@@ -2452,11 +2455,11 @@ fn main() {
             )?;
             *state.status_menu.lock().unwrap() = Some(launcher_status.clone());
             let open_taskboard_item =
-                MenuItem::with_id(app, "open-taskboard", "打开任务面板", true, None::<&str>)?;
+                MenuItem::with_id(app, "open-taskboard", "在 Codex 開啟雲端任務面板", true, None::<&str>)?;
             let open_taskboard_web = MenuItem::with_id(
                 app,
                 "open-taskboard-web",
-                "在网页打开任务面板",
+                "在瀏覽器開啟雲端任務面板",
                 true,
                 None::<&str>,
             )?;

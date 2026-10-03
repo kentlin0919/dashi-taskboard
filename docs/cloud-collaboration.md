@@ -7,7 +7,7 @@ Codex Taskboard can run as a small shared Cloudflare deployment for two trusted 
 - a private R2 bucket stores attachments;
 - one SQLite-backed Durable Object broadcasts revision changes over hibernating WebSockets;
 - UI, API, and attachment routes use HTTPS Basic Authentication; `/health` is public;
-- open boards refresh when a revision event arrives; reconnects perform one revision check and never poll periodically.
+- open boards refresh when a revision event arrives when Durable Objects are configured; Sites deployments without that binding check the shared revision every second. Returning to a visible tab or reconnecting the network checks immediately. The local companion uses the transport advertised by the cloud service.
 
 The production resource names are:
 

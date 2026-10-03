@@ -271,6 +271,11 @@ async function copyApplicationResources() {
     path.join(appResources, "cli", "taskctl.mjs"),
   );
 
+  await copyFile(
+    path.join(projectRoot, "cli", "device-agent.mjs"),
+    path.join(appResources, "cli", "device-agent.mjs"),
+  );
+
   if (target === windowsTarget) {
     const taskctlWrapper = [
       "@echo off",

@@ -3123,10 +3123,9 @@ async function routeApi(request, env, actor, url) {
     return json(200, {
       mode: "cloud",
       manageTaskboardSkillPath: null,
-      realtime: {
-        transport: hasRealtime ? "websocket" : "poll",
-        endpoint: hasRealtime ? "/api/events" : "/api/meta",
-      },
+      realtime: hasRealtime
+        ? { transport: "websocket", endpoint: "/api/events" }
+        : { transport: "poll", intervalMs: 1000 },
       localCapabilities: { available: false },
     });
   }

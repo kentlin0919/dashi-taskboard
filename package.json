@@ -27,7 +27,7 @@
     "dev:server": "node --watch server/index.mjs --dev",
     "dev:web": "vite --config web/vite.config.ts",
     "dev:cloud": "npm run build:web && wrangler dev --local",
-    "build": "vite build --config web/vite.config.ts && node scripts/codex-injector.mjs --refresh-if-running",
+    "build": "npm run build:sites",
     "build:web": "vite build --config web/vite.config.ts",
     "build:server": "esbuild cloud/src/index.mjs --bundle --platform=neutral --format=esm --outfile=dist/server/index.js",
     "build:sites": "npm run build:web && node scripts/build-sites-server.mjs",
