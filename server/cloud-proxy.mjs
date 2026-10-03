@@ -228,7 +228,10 @@ export function createCloudProxy({
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       return {
         url: url.href,
-        headers: { authorization: basicAuthorization(config.actorName, config.sharedKey) },
+        headers: {
+          authorization: basicAuthorization(config.actorName, config.sharedKey),
+          ...(config.siteAuthorizationToken ? { "OAI-Sites-Authorization": `Bearer ${config.siteAuthorizationToken}` } : {}),
+        },
       };
     },
     async forward(request) {
@@ -266,6 +269,8 @@ export function createCloudProxy({
         if (name.toLowerCase().startsWith("x-taskboard-user-")) headers.delete(name);
       }
       headers.set("authorization", basicAuthorization(config.actorName, config.sharedKey));
+      headers.delete("OAI-Sites-Authorization");
+      if (config.siteAuthorizationToken) headers.set("OAI-Sites-Authorization", `Bearer ${config.siteAuthorizationToken}`);
 
       const prepared = await prepareRequest(request, {
         assertTaskProjectMoveAllowed,

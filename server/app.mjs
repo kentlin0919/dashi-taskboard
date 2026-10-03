@@ -1967,12 +1967,13 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "PUT") {
           const body = await readJson(request);
           assertPlainObject(body);
-          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey"]));
+          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey", "siteAuthorizationToken"]));
           try {
             const config = await cloudConfig.configure({
               remoteUrl: body.remoteUrl,
               actorName: body.actorName,
               sharedKey: body.sharedKey,
+              siteAuthorizationToken: body.siteAuthorizationToken,
             });
             return sendJson(response, 200, {
               mode: "cloud",

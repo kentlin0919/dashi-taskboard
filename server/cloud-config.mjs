@@ -17,6 +17,7 @@ function emptyConfig() {
     remoteUrl: null,
     actorName: null,
     sharedKey: null,
+    siteAuthorizationToken: null,
     projectMappings: {},
   };
 }
@@ -96,12 +97,17 @@ function parseConfig(value) {
     "remoteUrl",
     "actorName",
     "sharedKey",
+    "siteAuthorizationToken",
     "projectMappings",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
     throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud companion configuration is invalid");
   }
   const projectMappings = validateProjectMappings(value.projectMappings);
+  const siteAuthorizationToken = value.siteAuthorizationToken ?? null;
+  if (siteAuthorizationToken !== null && (typeof siteAuthorizationToken !== "string" || !siteAuthorizationToken || /[\r\n]/.test(siteAuthorizationToken))) {
+    throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Sites authorization token is invalid");
+  }
   if (value.remoteUrl === null && value.actorName === null && value.sharedKey === null) {
     return { ...emptyConfig(), projectMappings };
   }
@@ -110,6 +116,7 @@ function parseConfig(value) {
     version: CONFIG_VERSION,
     remoteUrl: normalizeCloudUrl(value.remoteUrl),
     ...credentials,
+    siteAuthorizationToken,
     projectMappings,
   };
 }
@@ -128,6 +135,7 @@ export function createCloudConfigStore({ configPath }) {
   }
 
   async function writeAtomically(config) {
+    config = parseConfig(config);
     await mkdir(path.dirname(configPath), { recursive: true });
     const temporaryPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
@@ -149,13 +157,14 @@ export function createCloudConfigStore({ configPath }) {
       await pendingWrite;
       return readFromDisk();
     },
-    async configure({ remoteUrl, actorName, sharedKey }) {
+    async configure({ remoteUrl, actorName, sharedKey, siteAuthorizationToken = null }) {
       const normalizedUrl = normalizeCloudUrl(remoteUrl);
       const credentials = validateCredentials(actorName, sharedKey);
       return update((config) => ({
         ...config,
         remoteUrl: normalizedUrl,
         ...credentials,
+        siteAuthorizationToken,
       }));
     },
     clearCloud() {
@@ -164,6 +173,7 @@ export function createCloudConfigStore({ configPath }) {
         remoteUrl: null,
         actorName: null,
         sharedKey: null,
+        siteAuthorizationToken: null,
       }));
     },
     setProjectWorkspace(projectId, workspacePath) {
