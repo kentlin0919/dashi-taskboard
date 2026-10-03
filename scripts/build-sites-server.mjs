@@ -53,7 +53,6 @@ async function main() {
     const path = `/${relative(webRoot, filename).split(sep).join("/")}`;
     assets[path] = {
       body: compressed.toString("base64"),
-      compressedSize: compressed.byteLength,
       contentType: assetTypes[extname(filename).toLowerCase()] ?? "application/octet-stream",
       etag: `"${createHash("sha256").update(content).digest("hex")}"`,
       size: content.byteLength,
@@ -77,16 +76,6 @@ function bytesFor(asset) {
   return bytes;
 }
 
-function acceptsGzip(request) {
-  return (request.headers.get("accept-encoding") ?? "")
-    .split(",")
-    .some((value) => {
-      const [encoding, ...parameters] = value.trim().split(";");
-      const quality = parameters.find((parameter) => parameter.trim().startsWith("q="));
-      return encoding.toLowerCase() === "gzip" && Number(quality?.trim().slice(2) ?? "1") > 0;
-    });
-}
-
 export function fetchEmbeddedAsset(request) {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
@@ -108,10 +97,9 @@ export function fetchEmbeddedAsset(request) {
 
   const headers = new Headers({
     "cache-control": pathname === "/index.html" ? "private, no-cache" : "private, max-age=3600",
-    "content-length": String(acceptsGzip(request) ? asset.compressedSize : asset.size),
+    "content-length": String(asset.size),
     "content-type": asset.contentType,
     etag: asset.etag,
-    vary: "accept-encoding",
   });
   if (request.headers.get("if-none-match") === asset.etag) {
     headers.delete("content-length");
@@ -119,12 +107,9 @@ export function fetchEmbeddedAsset(request) {
   }
 
   const compressed = bytesFor(asset);
-  if (acceptsGzip(request)) headers.set("content-encoding", "gzip");
   const body = request.method === "HEAD"
     ? null
-    : acceptsGzip(request)
-      ? compressed
-      : new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
+    : new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
   return new Response(body, { headers });
 }
 `;
