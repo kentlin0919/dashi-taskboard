@@ -1,0 +1,73 @@
+name: PR 2 isolated repair verification
+
+on:
+  push:
+    branches: [codex/pr2-review-fix-runner]
+    paths: ['.review-fix/**']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr2-isolated-repair
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: repair-tools
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 4668e01e327bb9fea23d1bcf575c2080265fe350
+          path: target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        working-directory: target
+        run: npm ci
+      - name: Add regression tests and reproduce the frontend failure
+        working-directory: target
+        run: |
+          python3 ../repair-tools/.review-fix/apply.py tests
+          set +e
+          npx vitest run web/src/components/ProjectAutomationMenu.test.tsx --environment jsdom > pr2-before.log 2>&1
+          result=$?
+          set -e
+          cat pr2-before.log
+          if [ "$result" -eq 0 ]; then
+            echo 'Expected the reported frontend regression before applying the fix.'
+            exit 1
+          fi
+          grep -q 'AssertionError' pr2-before.log
+      - name: Apply the reviewed fixes
+        working-directory: target
+        run: python3 ../repair-tools/.review-fix/apply.py fixes
+      - name: Typecheck
+        working-directory: target
+        run: npm run typecheck
+      - name: Frontend regression tests
+        working-directory: target
+        run: npx vitest run web/src/components/ProjectAutomationMenu.test.tsx --environment jsdom
+      - name: Cloud, migration and device regression tests
+        working-directory: target
+        run: node --test test/pr2-review-regressions.test.mjs test/multidevice-path-verification.test.mjs test/site-data-migration.test.mjs test/device-agent.test.mjs
+      - name: Build Sites worker and frontend
+        working-directory: target
+        run: npm run build:sites
+      - name: Publish only product fixes to the result branch
+        working-directory: target
+        run: |
+          git diff --check
+          git config user.name 'ChatGPT'
+          git config user.email 'noreply@openai.com'
+          git add web/src/App.tsx web/src/api.ts web/src/components/ProjectAutomationMenu.tsx web/src/components/ProjectAutomationMenu.test.tsx test/pr2-review-regressions.test.mjs cloud/src/index.mjs package.json
+          git diff --cached --stat
+          git commit -m 'Complete cloud device scheduling and add PR review regression coverage'
+          git push origin HEAD:refs/heads/codex/pr2-review-fixes
+          echo "Verified product commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
