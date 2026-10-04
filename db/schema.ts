@@ -243,3 +243,8 @@ export const siteMigrationRuns = sqliteTable("site_migration_runs", {
   bundleSha256: text("bundle_sha256").notNull().unique(),
   createdAt: text("created_at").notNull(),
 });
+
+export const clientStorage = sqliteTable("client_storage", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});

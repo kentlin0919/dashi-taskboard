@@ -99,7 +99,7 @@ export function buildTaskboardAutomationPrompt(request) {
   const candidateInstructions = [
     "从返回的 todo 中只选择依赖已完成的议题：relations.blockedBy 为空，或其中每个依赖的 status 都严格等于 done。无依赖的 todo 仍可并行处理。若有 todo 但全部被未完成依赖阻塞，本轮直接结束，不暂停自动化，也不创建或打开新的任务会话。",
     "每次仅处理一个符合依赖条件的 todo：选定后先用 issue get 读取最新议题内容，并用 comment list 读取全部评论。根据描述和最新评论判断是否允许开始；若其中写明等待、暂不执行或当前不应开始，立即跳过并报告，不改状态。评论也包含已完成后被打回的返工要求。",
-    "完成 issue get 和 comment list 后、移动状态前，必须再次运行 issue get，并复核 relations.blockedBy 仍为空或其中每个依赖的 status 都严格等于 done。若依赖条件不再满足，立即跳过并结束本轮，不改状态，也不暂停自动化。",
+    "完成 issue get 和 comment list 后、移动状态前，必须再次运行 issue get 和 comment list，确认主文、全部评论及附件清单没有新增、编辑或删除；若发生变化重新判断开始条件，不得沿用旧判定。复核 relations.blockedBy 仍为空或其中每个依赖的 status 都严格等于 done。若依赖条件不再满足，立即跳过并结束本轮，不改状态，也不暂停自动化。",
   ];
   const executionInstructions = remoteProject
     ? [
@@ -128,6 +128,7 @@ export function buildTaskboardAutomationPrompt(request) {
     `本轮所有 taskctl 操作都使用完整命令前缀 ${taskctlCommand}，不要使用 PATH 中的 taskctl。`,
     `开始时先运行 ${taskctlCommand} issue list --project ${request.taskboardProjectId} --status todo --json。若没有 todo，直接结束；Taskboard 主机侧会暂停当前自动化，不要创建或打开新的任务会话。`,
     ...executionInstructions,
+    "执行后写入状态前，重新读取主文、全部评论、附件及依赖，比较执行开始时的内容快照，排除本会话自己的进度留言。若有新要求、附件或评论编辑，先处理变化；无法继续时以完整原 binding 和最新 version 写入 blocked，说明待使用者确认。任务或完整五栏 binding 已转移到其他会话时立即停止写入。进程或回合结束本身不代表完成；只有完成当前授权范围并记录实际验证证据后才能写入 in_review。",
     `本次处理或交接后，再次运行 ${taskctlCommand} issue list --project ${request.taskboardProjectId} --status todo --json。若没有 todo，直接结束；Taskboard 主机侧会暂停当前自动化，避免后续创建空会话。`,
   ].join("\n");
 }

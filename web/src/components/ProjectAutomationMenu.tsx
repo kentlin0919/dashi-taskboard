@@ -19,6 +19,7 @@ interface AutomationOptions {
   intervalMinutes: IntervalMinutes;
   model: string;
   reasoningEffort: string;
+  workspacePath?: string;
 }
 
 interface AutomationState extends AutomationOptions {
@@ -35,6 +36,7 @@ interface AutomationState extends AutomationOptions {
 interface ProjectAutomationMenuProps {
   automation?: Partial<AutomationState>;
   deviceAutomations?: DeviceAutomation[];
+  deviceMode?: boolean;
   models: AiChatModel[];
   pending: boolean;
   error: string | null;
@@ -74,6 +76,7 @@ function automationOptions(
 export function ProjectAutomationMenu({
   automation,
   deviceAutomations,
+  deviceMode = false,
   models,
   pending,
   error,
@@ -103,8 +106,9 @@ export function ProjectAutomationMenu({
         enabledByUser: currentDevice.enabledByUser,
         quotaAware: currentDevice.quotaAware,
         intervalMinutes: (currentDevice.intervalMinutes as IntervalMinutes) || 5,
-        model: currentDevice.model || models[0]?.slug || "",
+        model: currentDevice.model || "",
         reasoningEffort: currentDevice.reasoningEffort || "",
+        workspacePath: currentDevice.workspacePath ?? "",
       };
     }
     return automationOptions(models, automation);
@@ -116,8 +120,9 @@ export function ProjectAutomationMenu({
         enabledByUser: currentDevice.enabledByUser,
         quotaAware: currentDevice.quotaAware,
         intervalMinutes: (currentDevice.intervalMinutes as IntervalMinutes) || 5,
-        model: currentDevice.model || models[0]?.slug || "",
+        model: currentDevice.model || "",
         reasoningEffort: currentDevice.reasoningEffort || "",
+        workspacePath: currentDevice.workspacePath ?? "",
       });
     }
   }, [currentDevice]);
@@ -155,7 +160,7 @@ export function ProjectAutomationMenu({
               ? text("运行中", "Running")
               : text("已暂停", "Paused")));
   const selectedModel = models.find((model) => model.slug === draft.model) ?? models[0];
-  const disabled = pending || (!currentDevice && (!selectedModel || Boolean(unavailableReason)));
+  const disabled = pending || (deviceMode && !currentDevice) || (!currentDevice && (!selectedModel || Boolean(unavailableReason)));
 
   useEffect(() => {
     if (!open) return;
@@ -164,8 +169,9 @@ export function ProjectAutomationMenu({
         enabledByUser: currentDevice.enabledByUser,
         quotaAware: currentDevice.quotaAware,
         intervalMinutes: (currentDevice.intervalMinutes as IntervalMinutes) || 5,
-        model: currentDevice.model || models[0]?.slug || "",
+        model: currentDevice.model || "",
         reasoningEffort: currentDevice.reasoningEffort || "",
+        workspacePath: currentDevice.workspacePath ?? "",
       });
     } else {
       setDraft(automationOptions(models, automation));
@@ -178,9 +184,14 @@ export function ProjectAutomationMenu({
 
   useEffect(() => {
     if (wasPendingRef.current && !pending) {
-      if (!currentDevice) {
-        setDraft(automationOptions(models, automation));
-      }
+      setDraft(currentDevice ? {
+        enabledByUser: currentDevice.enabledByUser,
+        quotaAware: currentDevice.quotaAware,
+        intervalMinutes: currentDevice.intervalMinutes as IntervalMinutes,
+        model: currentDevice.model || "",
+        reasoningEffort: currentDevice.reasoningEffort || "",
+        workspacePath: currentDevice.workspacePath ?? "",
+      } : automationOptions(models, automation));
     }
     wasPendingRef.current = pending;
   }, [automation, currentDevice, pending]);
@@ -220,7 +231,7 @@ export function ProjectAutomationMenu({
     setDraft(next);
     if (currentDevice && onDeviceChange) {
       onDeviceChange(currentDevice.deviceId, next);
-    } else {
+    } else if (!deviceMode) {
       onChange(next);
     }
   };
@@ -233,6 +244,9 @@ export function ProjectAutomationMenu({
       aria-label={text("自动认领待办设置", "Auto-claim settings")}
       style={{ left: position.left, top: position.top, visibility: position.ready ? "visible" : "hidden" }}
     >
+      {deviceMode && !currentDevice && !pending && !error && (
+        <p>{text("请先新增并配对设备，再设定自动认领。", "Add and pair a device before setting auto-claim.")}</p>
+      )}
       <div className="project-automation-menu-heading">
         <strong>{text("自动认领待办", "Auto-claim tasks")}</strong>
         <span className={isDeviceRunning || status === "ACTIVE" ? "is-active" : "is-paused"}>
@@ -279,6 +293,21 @@ export function ProjectAutomationMenu({
         </div>
       )}
 
+      {currentDevice && (
+        <label className="project-automation-switch">
+          <span>{text("此设备的项目目录", "Project folder on this device")}</span>
+          <input
+            aria-label={text("此设备的项目目录", "Project folder on this device")}
+            value={draft.workspacePath ?? ""}
+            placeholder="/absolute/path/to/project"
+            disabled={pending}
+            onChange={(event) => setDraft({ ...draft, workspacePath: event.target.value })}
+            onBlur={() => {
+              if (draft.workspacePath !== (currentDevice.workspacePath ?? "")) submitChange(draft);
+            }}
+          />
+        </label>
+      )}
       <div className="project-automation-switch">
         <span>{text("自动认领开关", "Auto-claim")}</span>
         <button
@@ -423,8 +452,8 @@ export function ProjectAutomationMenu({
             )}
         </p>
       )}
-      {!currentDevice && unavailableReason && <p className="project-automation-note">{unavailableReason}</p>}
-      {!currentDevice && error && error !== unavailableReason && <p className="project-automation-error" role="alert">{error}</p>}
+      {!deviceMode && !currentDevice && unavailableReason && <p className="project-automation-note">{unavailableReason}</p>}
+      {error && (currentDevice || deviceMode || error !== unavailableReason) && <p className="project-automation-error" role="alert">{error}</p>}
     </div>,
     document.body,
   ) : null;

@@ -916,6 +916,7 @@ export async function updateProjectDeviceAutomation(
     intervalMinutes: number;
     model: string;
     reasoningEffort: string;
+    workspacePath?: string;
   }
 ): Promise<{ success: boolean }> {
   return request(

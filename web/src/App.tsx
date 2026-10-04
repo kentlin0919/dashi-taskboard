@@ -846,15 +846,37 @@ export function App() {
   const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
   const [projectDeviceAutomations, setProjectDeviceAutomations] = useState<DeviceAutomation[]>([]);
 
+  const [deviceAutomationPending, setDeviceAutomationPending] = useState(false);
+  const [deviceAutomationError, setDeviceAutomationError] = useState<string | null>(null);
+  const deviceAutomationRequestRef = useRef(0);
+  const deviceAutomationProjectRef = useRef(selectedProjectId);
+  deviceAutomationProjectRef.current = selectedProjectId;
+
   async function refreshDeviceAutomations(projectId: string) {
     if (!projectId || projectId === ALL_PROJECTS_ID) return;
+    const requestId = ++deviceAutomationRequestRef.current;
+    setDeviceAutomationPending(true);
+    setDeviceAutomationError(null);
     try {
       const automations = await fetchProjectDeviceAutomations(projectId);
-      setProjectDeviceAutomations(automations);
-    } catch {
-      // 忽略
+      if (requestId === deviceAutomationRequestRef.current && deviceAutomationProjectRef.current === projectId) {
+        setProjectDeviceAutomations(automations);
+      }
+    } catch (error) {
+      if (requestId === deviceAutomationRequestRef.current && deviceAutomationProjectRef.current === projectId) {
+        setDeviceAutomationError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (requestId === deviceAutomationRequestRef.current) setDeviceAutomationPending(false);
     }
   }
+
+  useEffect(() => {
+    ++deviceAutomationRequestRef.current;
+    setProjectDeviceAutomations([]);
+    setDeviceAutomationError(null);
+    setDeviceAutomationPending(false);
+  }, [selectedProjectId]);
 
   async function handleDeviceAutomationChange(
     deviceId: string,
@@ -864,14 +886,24 @@ export function App() {
       intervalMinutes: number;
       model: string;
       reasoningEffort: string;
+      workspacePath?: string;
     }
   ) {
-    if (!selectedProjectId) return;
+    const projectId = selectedProjectId;
+    if (!projectId) return;
+    setDeviceAutomationPending(true);
+    setDeviceAutomationError(null);
     try {
-      await updateProjectDeviceAutomation(selectedProjectId, deviceId, options);
-      await refreshDeviceAutomations(selectedProjectId);
-    } catch (err: any) {
-      setAnnouncement(text(`更新設備排程失敗：${err.message}`, `Failed to update device automation: ${err.message}`));
+      await updateProjectDeviceAutomation(projectId, deviceId, options);
+      if (deviceAutomationProjectRef.current === projectId) await refreshDeviceAutomations(projectId);
+    } catch (error) {
+      if (deviceAutomationProjectRef.current === projectId) {
+        setDeviceAutomationError(error instanceof Error ? error.message : String(error));
+        // Restore the saved settings after a rejected write.
+        setProjectDeviceAutomations((current) => [...current]);
+      }
+    } finally {
+      if (deviceAutomationProjectRef.current === projectId) setDeviceAutomationPending(false);
     }
   }
   const [pendingProjectDelete, setPendingProjectDelete] = useState<ProjectChoice | null>(null);
@@ -3604,11 +3636,15 @@ export function App() {
                 automation={selectedProjectAutomation}
                 deviceAutomations={projectDeviceAutomations}
                 models={automationModels}
-                pending={automationPending || automationCatalogLoading}
-                error={automationCatalogError ?? automationError}
+                deviceMode={taskboardMetadata?.mode === "cloud"}
+                pending={taskboardMetadata?.mode === "cloud" || projectDeviceAutomations.length > 0
+                  ? deviceAutomationPending : automationPending || automationCatalogLoading}
+                error={taskboardMetadata?.mode === "cloud" || projectDeviceAutomations.length > 0
+                  ? deviceAutomationError : automationCatalogError ?? automationError}
                 unavailableReason={automationProjectContext.unavailableReason}
                 onOpen={() => {
                   if (selectedProjectId) void refreshDeviceAutomations(selectedProjectId);
+                  if (taskboardMetadata?.mode === "cloud") return;
                   if (automationCatalogError && !automationCatalogLoading) {
                     setAutomationCatalogRetry((attempt) => attempt + 1);
                   } else {

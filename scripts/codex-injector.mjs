@@ -25,6 +25,8 @@ import {
   reconcileInjectionRuntime,
   restartResidentInjector,
 } from "./codex-injector-runtime.mjs";
+import { sanitizeAppServerModels } from "../server/ai-chat-catalog.mjs";
+import { runDeviceAgent } from "../cli/device-agent.mjs";
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
 import { createTaskboardSupervisor } from "./taskboard-supervisor.mjs";
 import {
@@ -95,6 +97,7 @@ const hostCapability = randomUUID();
 const injectionSourceHashName = "__CODEX_TASKBOARD_SOURCE_HASH__";
 const injectionScriptIdentifierName = "__CODEX_TASKBOARD_SCRIPT_IDENTIFIER__";
 const codexAutomationMethods = new Set([
+  "get-global-state",
   "list-automations",
   "automation-create",
   "automation-update",
@@ -110,6 +113,10 @@ const quotaPolicyCdps = new Set();
 const restoredQuotaPolicyCdps = new WeakSet();
 const quotaPolicyRestorePromises = new WeakMap();
 const remoteAutomationTurnWaiters = new Map();
+let devicePolicyTimer = null;
+let devicePolicySyncInFlight = false;
+const devicePolicySnapshots = new Map();
+const devicePolicyProjects = new Set();
 let quotaPoliciesLoadPromise = null;
 let quotaPoliciesWritePromise = Promise.resolve();
 const taskConversationAppServerTimeoutMs = 30_000;
@@ -1954,7 +1961,7 @@ function storedAutomationPolicy(request) {
 
 function restoredAutomationPolicy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { nextRunAt, quota, todoGate, ...stored } = value;
+  const { nextRunAt, quota, todoGate, deviceId, ...stored } = value;
   const request = parseTaskboardAutomationHostRequest({
     ...stored,
     id: "restored-policy",
@@ -1965,6 +1972,7 @@ function restoredAutomationPolicy(value) {
   return request
     ? {
       request,
+      ...(typeof deviceId === "string" ? { deviceId } : {}),
       ...(quota ? { quota } : {}),
       ...(todoGate && typeof todoGate.snapshot === "string"
         && ["checking", "wait", "start"].includes(todoGate.state) ? { todoGate } : {}),
@@ -1986,6 +1994,7 @@ async function ensureQuotaPoliciesLoaded() {
     for (const value of Object.values(stored)) {
       const restored = restoredAutomationPolicy(value);
       if (!restored) continue;
+      if (restored.deviceId) devicePolicyProjects.add(restored.request.taskboardProjectId);
       quotaPolicyRecords.set(restored.request.taskboardProjectId, {
         version: 1,
         ...restored,
@@ -2001,6 +2010,7 @@ function persistQuotaPolicies() {
       projectId,
       {
         ...storedAutomationPolicy(record.request),
+        ...(record.deviceId ? { deviceId: record.deviceId } : {}),
         ...(record.quota ? { quota: record.quota } : {}),
         ...(record.todoGate ? { todoGate: record.todoGate } : {}),
         ...(Number.isFinite(record.nextRunAt) ? { nextRunAt: record.nextRunAt } : {}),
@@ -2150,6 +2160,7 @@ async function updateAndApplyQuotaPolicy(request, rpc) {
   const record = {
     version: (previous?.version ?? 0) + 1,
     request,
+    ...(previous?.deviceId ? { deviceId: previous.deviceId } : {}),
     ...(request.quotaAware && previous?.quota ? { quota: previous.quota } : {}),
   };
   quotaPolicyRecords.set(request.taskboardProjectId, record);
@@ -2219,6 +2230,96 @@ async function enqueueCurrentQuotaPolicy(projectId, { evaluatedTodoGate } = {}) 
   );
 }
 
+async function synchronizeDevicePolicies() {
+  if (devicePolicySyncInFlight) return;
+  devicePolicySyncInFlight = true;
+  const rpc = (method, body) => requestCodexAutomationViaCdp(currentQuotaPolicyCdp(), undefined, method, body);
+  const pauseProject = async (projectId) => {
+    const stored = quotaPolicyRecords.get(projectId)?.request;
+    if (stored) await updateAndApplyQuotaPolicy({ ...stored, enabledByUser: false }, rpc);
+    devicePolicySnapshots.delete(projectId);
+  };
+  try {
+    await ensureQuotaPoliciesLoaded();
+    const credentials = JSON.parse(await readFile(path.join(taskboardDataDirectory, "device-credentials.json"), "utf8"));
+    const result = await runDeviceAgent({
+      credentials, once: true,
+      applyAutomation: async (automation) => {
+        const projectId = automation.projectId;
+        const snapshot = JSON.stringify(automation);
+        if (devicePolicySnapshots.get(projectId) === snapshot
+          && quotaPolicyRecords.get(projectId)?.request.enabledByUser === automation.enabledByUser) return;
+        if (!automation.enabledByUser) {
+          await pauseProject(projectId);
+          devicePolicySnapshots.set(projectId, snapshot);
+          return;
+        }
+        const response = await rpc("get-global-state", { key: "local-projects" });
+        const projects = response.value ?? {};
+        const matches = Object.entries(projects).filter(([, project]) => (
+          Array.isArray(project?.rootPaths)
+          && project.rootPaths.some((root) => normalizeRemoteWorkspace(root) === normalizeRemoteWorkspace(automation.workspacePath))
+        ));
+        if (matches.length !== 1) {
+          await pauseProject(projectId);
+          throw new Error(`專案 ${projectId} 的目錄必須對應到一個已加入 Codex App 的專案`);
+        }
+        const [codexProjectId, project] = matches[0];
+        const catalog = await requestCodexAppServerViaCdp(currentQuotaPolicyCdp(), undefined, "local", "model/list", { limit: 100 });
+        const models = sanitizeAppServerModels(catalog.data);
+        const selectedModel = automation.model
+          ? models.find((model) => model.slug === automation.model)
+          : models.find((model) => model.isDefault) ?? models[0];
+        if (!selectedModel) throw new Error("無法確認此裝置可使用的 Codex 模型");
+        const reasoningEffort = automation.reasoningEffort || selectedModel.defaultReasoningEffort;
+        if (!selectedModel.supportedReasoningEfforts.includes(reasoningEffort)) {
+          throw new Error("此裝置不支援排程選定的推理強度");
+        }
+        const request = {
+          taskboardProjectId: projectId, codexProjectId,
+          codexProjectKind: "local", codexHostId: "local",
+          projectName: project.name || projectId,
+          workspacePath: automation.workspacePath,
+          skillPath: path.join(projectRoot, "skills", "manage-taskboard", "SKILL.md"),
+          operation: "apply-policy",
+          enabledByUser: true, quotaAware: automation.quotaAware,
+          intervalMinutes: automation.intervalMinutes,
+          model: selectedModel.slug, reasoningEffort,
+          ...(quotaPolicyRecords.get(projectId)?.request.automationId
+            ? { automationId: quotaPolicyRecords.get(projectId).request.automationId } : {}),
+        };
+        // Do not mutate a native schedule while its project mapping is ambiguous.
+        await updateAndApplyQuotaPolicy(request, rpc);
+        quotaPolicyRecords.get(projectId).deviceId = credentials.deviceId;
+        await persistQuotaPolicies();
+        devicePolicyProjects.add(projectId);
+        devicePolicySnapshots.set(projectId, snapshot);
+      },
+    });
+    for (const projectId of devicePolicyProjects) {
+      if (!result.projectIds.includes(projectId)) {
+        await pauseProject(projectId);
+        devicePolicyProjects.delete(projectId);
+      }
+    }
+  } catch (error) {
+    // Revocation, missing credentials and connection failure must not leave a
+    // previously synced cloud schedule active indefinitely.
+    for (const projectId of devicePolicyProjects) {
+      await pauseProject(projectId).catch((failure) => console.error(`Device schedule pause failed: ${failure.message}`));
+    }
+    if (error.code !== "ENOENT") console.error(`Device schedule synchronization failed: ${error.message}`);
+  } finally {
+    devicePolicySyncInFlight = false;
+  }
+}
+
+function startDevicePolicySynchronization() {
+  if (devicePolicyTimer) return;
+  devicePolicyTimer = setInterval(() => { void synchronizeDevicePolicies(); }, 30_000);
+  devicePolicyTimer.unref();
+}
+
 async function restoreQuotaPolicies(cdp) {
   registerQuotaPolicyCdp(cdp);
   if (restoredQuotaPolicyCdps.has(cdp)) return;
@@ -2226,6 +2327,8 @@ async function restoreQuotaPolicies(cdp) {
   if (pending) return pending;
   const restoring = (async () => {
     await ensureQuotaPoliciesLoaded();
+    await synchronizeDevicePolicies();
+    startDevicePolicySynchronization();
     for (const [projectId, record] of quotaPolicyRecords) {
       if (record.request.enabledByUser) {
         await enqueueCurrentQuotaPolicy(projectId);
@@ -3304,6 +3407,21 @@ async function main() {
   const cleanup = () => {
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
+      if (devicePolicyTimer) clearInterval(devicePolicyTimer);
+      devicePolicyTimer = null;
+      for (const projectId of devicePolicyProjects) {
+        const request = quotaPolicyRecords.get(projectId)?.request;
+        if (!request) continue;
+        try {
+          await updateAndApplyQuotaPolicy({ ...request, enabledByUser: false }, (method, body) => (
+            requestCodexAutomationViaCdp(currentQuotaPolicyCdp(), undefined, method, body)
+          ));
+        } catch (error) {
+          console.error(`Could not pause device schedule on shutdown: ${error.message}`);
+        }
+      }
+      for (const timer of quotaPolicyTimers.values()) clearTimeout(timer);
+      quotaPolicyTimers.clear();
       injectedTargets.forEach((connection) => {
         unregisterRoutableCodexConnection(connection);
         unregisterQuotaPolicyCdp(connection);

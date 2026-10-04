@@ -2849,7 +2849,11 @@ async function saveProjectDeviceAutomation(projectId, deviceId, request, env) {
     `).bind(deviceId, projectId, enabledByUser, quotaAware, intervalMinutes, model, reasoningEffort, timestamp, timestamp),
   ];
 
-  if (typeof body.workspacePath === "string") {
+  if (body.workspacePath !== undefined) {
+    const workspacePath = stringField(body.workspacePath, "workspacePath", { maxLength: 4096 });
+    if (workspacePath && !/^(?:\/|[A-Za-z]:[\\/])/.test(workspacePath)) {
+      throw new ApiError(400, "INVALID_FIELD", "workspacePath must be an absolute path on the selected device");
+    }
     statements.push(
       env.DB.prepare(`
         INSERT INTO device_project_mappings (device_id, project_id, workspace_path, created_at, updated_at)
@@ -2857,7 +2861,7 @@ async function saveProjectDeviceAutomation(projectId, deviceId, request, env) {
         ON CONFLICT (device_id, project_id) DO UPDATE SET
           workspace_path = excluded.workspace_path,
           updated_at = excluded.updated_at
-      `).bind(deviceId, projectId, body.workspacePath, timestamp, timestamp)
+      `).bind(deviceId, projectId, body.workspacePath.trim(), timestamp, timestamp)
     );
   }
 
@@ -2899,9 +2903,32 @@ async function importSiteMigration(request, env) {
   if (env.TASKBOARD_MIGRATION_ENABLED !== "1") {
     throw new ApiError(404, "NOT_FOUND", "Resource not found");
   }
-  const rawBody = await request.text();
-  if (new TextEncoder().encode(rawBody).byteLength > 12 * 1024 * 1024) {
-    throw new ApiError(413, "BODY_TOO_LARGE", "Migration bundle cannot exceed 12 MiB");
+  // Base64 for one supported 25 MiB attachment needs about 34 MiB.
+  // Bound the input while streaming, before allocating the complete JSON string.
+  const limit = 40 * 1024 * 1024;
+  if (Number(request.headers.get("content-length")) > limit) {
+    throw new ApiError(413, "BODY_TOO_LARGE", "Migration bundle cannot exceed 40 MiB");
+  }
+  const reader = request.body?.getReader();
+  const decoder = new TextDecoder();
+  let rawBody = "";
+  let size = 0;
+  if (reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > limit) {
+          await reader.cancel();
+          throw new ApiError(413, "BODY_TOO_LARGE", "Migration bundle cannot exceed 40 MiB");
+        }
+        rawBody += decoder.decode(value, { stream: true });
+      }
+      rawBody += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
   }
   let bundle;
   try {
@@ -3202,8 +3229,18 @@ async function routeApi(request, env, actor, url) {
     requireNoQuery(url, "/api/client-storage");
     const hub = realtimeHub(env);
     if (!hub) {
-      if (request.method === "GET") return json(200, { entries: {} });
-      if (request.method === "PATCH") return empty(204);
+      if (request.method === "GET") {
+        const { results } = await env.DB.prepare("SELECT key, value FROM client_storage").all();
+        return json(200, { entries: Object.fromEntries(results.map((row) => [row.key, JSON.parse(row.value)])) });
+      }
+      if (request.method === "PATCH") {
+        const { key, value } = parseClientStorageUpdate(await readJson(request));
+        const statement = value === null
+          ? env.DB.prepare("DELETE FROM client_storage WHERE key = ?").bind(key)
+          : env.DB.prepare("INSERT INTO client_storage (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(key, JSON.stringify(value));
+        await env.DB.batch([statement, env.DB.prepare("UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1")]);
+        return empty(204);
+      }
       methodNotAllowed(["GET", "PATCH"]);
     }
     if (request.method === "GET") {

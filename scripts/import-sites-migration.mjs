@@ -66,6 +66,10 @@ async function main() {
       bodyBase64: Buffer.from(body).toString("base64"),
     })),
   };
+  const body = JSON.stringify(payload);
+  if (Buffer.byteLength(body) > 40 * 1024 * 1024) {
+    throw new Error("Migration bundle exceeds the Sites 40 MiB limit; reduce the combined attachment size before importing");
+  }
   const response = await fetch(`${siteUrl.origin}/api/admin/migration/import`, {
     method: "POST",
     headers: {
@@ -75,7 +79,7 @@ async function main() {
       "OAI-Sites-Authorization": `Bearer ${input.siteAuthorizationToken}`,
       "Cache-Control": "no-store",
     },
-    body: JSON.stringify(payload),
+    body,
   });
   const result = await response.json().catch(() => null);
   if (!response.ok || !result || typeof result !== "object") {
