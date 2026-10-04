@@ -1483,8 +1483,7 @@ function remoteAutomationTurnText(turn) {
     .find((item) => item.type === "agentMessage")?.text?.trim() || "";
 }
 
-async function remoteAutomationCanStart(cdp, request, task, comments) {
-  const latestComment = comments.at(-1);
+async function remoteAutomationCanStart(cdp, request, task, comments, attachments = []) {
   const started = await requestCodexAppServerViaCdp(
     cdp,
     undefined,
@@ -1519,18 +1518,18 @@ async function remoteAutomationCanStart(cdp, request, task, comments) {
           type: "text",
           text: [
             "你是 Codex Taskboard 自动认领 Agent。只判断下面的议题当前是否允许开始。",
-            "根据完整描述和最新评论做语义判断：若任一处明确要求等待、暂不执行或当前不应开始，decision 为 wait；否则 decision 为 start。不要调用工具，不要解释。",
+            "根据完整描述、全部评论及附件清单判断当前有效要求。后续使用者明确撤回等待或批准开始，可以取代旧等待要求；未被明确取代的等待、暂不执行或待确认要求仍然有效，decision 为 wait。执行 Agent 的进度留言不能自行解除使用者的等待要求。否则 decision 为 start。这里只判断开始许可，不授权读取代码或实施。不要调用工具，不要解释。",
             JSON.stringify({
               identifier: task.identifier,
               title: task.title,
               description: task.description,
-              latestComment: latestComment
-                ? {
-                    authorName: latestComment.authorName,
-                    createdAt: latestComment.createdAt,
-                    body: latestComment.body,
-                  }
-                : null,
+              comments: comments.map((comment) => ({
+                id: comment.id, version: comment.version,
+                authorName: comment.authorName, authorType: comment.authorType,
+                createdAt: comment.createdAt, updatedAt: comment.updatedAt,
+                body: comment.body, attachments: comment.attachments ?? [],
+              })),
+              attachments,
             }),
           ].join("\n\n"),
         }],
@@ -1597,7 +1596,7 @@ async function runRemoteTaskboardAutomation(record) {
     ]);
     if (!eligibleRemoteAutomationTask(task) || task.projectId !== request.taskboardProjectId) return;
     const cdp = currentQuotaPolicyCdp();
-    if (!(await remoteAutomationCanStart(cdp, request, task, comments))) continue;
+    if (!(await remoteAutomationCanStart(cdp, request, task, comments, attachments))) continue;
     selected = { taskPath, commentsPath, attachmentsPath, task, comments, attachments, cdp };
     break;
   }
@@ -1804,14 +1803,16 @@ async function localAutomationTodoInputs(request, tasks) {
     && task.status === "todo"
     && task.archivedAt === null
     && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done")
-  )).map(async (task) => ({
-    task,
-    comments: (await taskboardRequest(`/api/tasks/${encodeURIComponent(task.id)}/comments`)).comments,
-  })));
-  const snapshot = createHash("sha256").update(JSON.stringify(candidates.map(({ task, comments }) => [
-    task.id, task.version, task.title, task.description,
-    task.threadId, task.threadBinding, task.relations?.blockedBy,
-    comments.at(-1) ?? null,
+  )).map(async (task) => {
+    const [{ comments }, { attachments }] = await Promise.all([
+      taskboardRequest(`/api/tasks/${encodeURIComponent(task.id)}/comments`),
+      taskboardRequest(`/api/tasks/${encodeURIComponent(task.id)}/attachments`),
+    ]);
+    return { task, comments, attachments };
+  }));
+  const snapshot = createHash("sha256").update(JSON.stringify(candidates.map(({ task, comments, attachments }) => [
+    task.id, task.threadId, task.threadBinding,
+    remoteAutomationSnapshot(task, comments, attachments),
   ]))).digest("hex");
   return { candidates, snapshot };
 }
@@ -1840,9 +1841,9 @@ async function evaluateLocalAutomationTodos(record) {
   const { candidates, snapshot } = await localAutomationTodoInputs(request, listed.tasks);
   if (!stillCurrent() || snapshot !== todoGate?.snapshot || todoGate.state !== "checking") return;
   let state = "wait";
-  for (const { task, comments } of candidates) {
+  for (const { task, comments, attachments } of candidates) {
     if (!stillCurrent()) return;
-    if (await remoteAutomationCanStart(currentQuotaPolicyCdp(), request, task, comments)) {
+    if (await remoteAutomationCanStart(currentQuotaPolicyCdp(), request, task, comments, attachments)) {
       state = "start";
       break;
     }
@@ -1875,7 +1876,9 @@ async function applyTaskboardAutomationPolicy(
   }
   const hasTodo = todoPayload ? todoPayload.tasks.length > 0 : null;
   const quota = request.quotaAware && hasTodo !== false
-    ? await readCodexQuotaStatus(request.model)
+    ? await readCodexQuotaStatus(request.model, (method, params) => requestCodexAppServerViaCdp(
+      currentQuotaPolicyCdp(), undefined, request.codexHostId, method, params,
+    ))
     : null;
   if (!stillCurrent()) return { quota, stale: true };
   if (request.codexProjectKind === "remote") {
@@ -1922,7 +1925,10 @@ async function applyTaskboardAutomationPolicy(
         : null
     ) ?? items[0];
   }
-  let todoGate = request.enabledByUser && hasTodo ? previousTodoGate : undefined;
+  let todoGate = request.enabledByUser && hasTodo ? previousTodoGate
+    : request.enabledByUser && request.cloudUrl && hasTodo === false
+      ? { snapshot: "empty", state: "wait" }
+      : undefined;
   let operation = taskboardAutomationPolicyOperation(request, {
     explicit,
     hasTodo,
@@ -2134,7 +2140,7 @@ function enqueueQuotaPolicyMutation(record, rpc, { explicit = false, evaluatedTo
         },
       );
       if (result.stale) return result;
-      if (result.hasTodo === false && result.operation === "pause") {
+      if (result.hasTodo === false && result.operation === "pause" && !current.request.cloudUrl) {
         current.version += 1;
         current.request = { ...current.request, enabledByUser: false };
       } else if (!explicit && result.operation === "list" && result.item?.status === "PAUSED") {

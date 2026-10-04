@@ -263,7 +263,7 @@ test("local wait rounds pause cron before semantic work, retain intent and survi
   assert.ok(h.apiCalls.every((call) => call.method === "GET"));
   assert.ok(h.models.every((call) => call.hostId === "local"));
   assert.equal(h.models[0].input.description, before[0].description);
-  assert.equal(h.models[0].input.latestComment.body, "Do not implement yet.");
+  assert.equal(h.models[0].input.comments.at(-1).body, "Do not implement yet.");
   assert.deepEqual(h.errors, []);
 });
 

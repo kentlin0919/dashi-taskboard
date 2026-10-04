@@ -7,29 +7,29 @@ import { executableCommand } from "../shared/executable-command.mjs";
 
 const REQUEST_TIMEOUT_MS = 8_000;
 
-export async function readCodexQuotaStatus(model) {
+export async function readCodexQuotaStatus(model, request) {
   const checkedAt = Date.now();
+  let session;
   try {
-    const session = startAppServer();
-    try {
+    if (!request) {
+      session = startAppServer();
       await session.request("initialize", {
         clientInfo: { name: "codex-taskboard", version: "0.1.0" },
       });
       session.notify("initialized", {});
-      const account = await session.request("account/read", { refreshToken: false });
-      if (account?.account?.type === "apiKey") {
-        return { state: "unavailable", reason: "api-key", checkedAt };
-      }
-      if (account?.account?.type !== "chatgpt") {
-        return { state: "unknown", checkedAt };
-      }
-      const result = await session.request("account/rateLimits/read", {});
-      return evaluateRateLimits(result, model, checkedAt);
-    } finally {
-      session.close();
+      request = session.request;
     }
+    const account = await request("account/read", { refreshToken: false });
+    if (account?.account?.type === "apiKey") {
+      return { state: "unavailable", reason: "api-key", checkedAt };
+    }
+    if (account?.account?.type !== "chatgpt") return { state: "unknown", checkedAt };
+    const result = await request("account/rateLimits/read", {});
+    return evaluateRateLimits(result, model, checkedAt);
   } catch {
     return { state: "unknown", checkedAt };
+  } finally {
+    session?.close();
   }
 }
 
@@ -132,12 +132,19 @@ function evaluateRateLimits(result, model, checkedAt) {
   const exhaustedWindows = windows.filter((window) => (
     Number(window.usedPercent) >= 100
   ));
-  const individuallyExhausted = Number(snapshot.individualLimit?.remainingPercent) <= 0;
+  const individuallyExhausted = typeof snapshot.individualLimit?.remainingPercent === "number"
+    && snapshot.individualLimit.remainingPercent <= 0;
   const blocked = Boolean(snapshot.rateLimitReachedType)
     || snapshot.spendControlReached === true
     || individuallyExhausted
     || (exhaustedWindows.length > 0 && !creditsAvailable);
 
+  const validPercent = (value) => typeof value === "number"
+    && Number.isFinite(value) && value >= 0 && value <= 100;
+  const hasLimits = windows.length > 0
+    && windows.every((window) => validPercent(window.usedPercent));
+  const hasIndividualLimit = validPercent(snapshot.individualLimit?.remainingPercent);
+  if (!blocked && !hasLimits && !hasIndividualLimit) return { state: "unknown", checkedAt };
   if (!blocked) return { state: "available", checkedAt };
 
   const resetCandidates = [
@@ -147,7 +154,7 @@ function evaluateRateLimits(result, model, checkedAt) {
   if (snapshot.rateLimitReachedType || snapshot.spendControlReached === true) {
     resetCandidates.push(...windows.map((window) => Number(window.resetsAt)));
   }
-  const resetsAt = Math.max(...resetCandidates.filter(Number.isFinite));
+  const resetsAt = Math.max(...resetCandidates.filter((value) => Number.isFinite(value) && value > checkedAt / 1_000));
   return {
     state: "blocked",
     checkedAt,
