@@ -45,7 +45,7 @@ function persist(key: string, value: string | null) {
       try {
         const response = await fetch(new URL("api/client-storage", document.baseURI), {
           method: "PATCH",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "X-Taskboard-Client": "taskboard-web" },
           body,
           keepalive,
         });

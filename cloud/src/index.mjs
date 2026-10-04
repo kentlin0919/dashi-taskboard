@@ -31,6 +31,7 @@ import {
 } from "../../shared/api-fields.mjs";
 
 import { DEFAULT_LABEL_NAMES, TASK_STATUSES, TASK_PRIORITIES } from "../../shared/domain.mjs";
+import { authenticateUserSession, routeUserSession } from "./user-session.mjs";
 
 const JSON_BODY_LIMIT = 1024 * 1024;
 const PROJECT_README_BODY_LIMIT = 3 * 1024 * 1024;
@@ -332,6 +333,7 @@ async function authenticate(request, env) {
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7).trim();
     if (!token || !env.DB) return null;
+    if (token.startsWith("ut_")) return authenticateUserSession(token, env);
     const tokenHash = await sha256Hex(token);
     const device = await env.DB.prepare(
       "SELECT id, name, status FROM devices WHERE token_hash = ?"
@@ -3137,6 +3139,8 @@ async function importSiteMigration(request, env) {
 
 async function routeApi(request, env, actor, url) {
   const { pathname } = url;
+  const userSessionResponse = await routeUserSession(request, env, actor, readJson, json);
+  if (userSessionResponse) return userSessionResponse;
 
   if (pathname === "/api/admin/migration/import") {
     if (request.method !== "POST") methodNotAllowed(["POST"]);

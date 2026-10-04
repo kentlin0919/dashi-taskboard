@@ -36,6 +36,7 @@ import { AiChatService } from "./ai-chat.mjs";
 import { resolveAiWorkspace, resolveMappedAiWorkspace } from "./ai-chat-catalog.mjs";
 import { decodeComposerReferenceKey } from "../shared/composer-reference.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
+import { createUserSessionService } from "./user-session.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
@@ -1417,6 +1418,7 @@ export function createTaskboardServer(options = {}) {
   const cloudConfig = options.cloudConfigStore ?? createCloudConfigStore({
     configPath: resolved.cloudConfigPath,
   });
+  const userSessionService = createUserSessionService(cloudConfig, options.remoteFetch ?? globalThis.fetch);
   const jiraConfig = options.jiraConfigStore ?? createJiraConfigStore({
     configPath: resolved.jiraConfigPath,
   });
@@ -1857,7 +1859,10 @@ export function createTaskboardServer(options = {}) {
               response,
               await cloudProxy.forward(new Request("http://127.0.0.1/api/client-storage", {
                 method: "PATCH",
-                headers: { "content-type": "application/json" },
+                headers: {
+                  "content-type": "application/json",
+                  ...(request.headers["x-taskboard-client"] ? { "x-taskboard-client": request.headers["x-taskboard-client"] } : {}),
+                },
                 body: JSON.stringify(update),
               })),
             );
@@ -1949,6 +1954,14 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "PUT"]);
       }
 
+      if (pathname === "/api/local/user-session" || pathname === "/api/local/user-session/claim") {
+        const service = userSessionService;
+        if (request.method === "GET" && pathname === "/api/local/user-session") return sendJson(response, 200, await service.status());
+        if (request.method === "POST") return sendJson(response, 200, await (pathname.endsWith("/claim") ? service.claim() : service.start()));
+        if (request.method === "DELETE" && pathname === "/api/local/user-session") return sendJson(response, 200, await service.logout());
+        return methodNotAllowed(response, ["GET", "POST", "DELETE"]);
+      }
+
       if (pathname === "/api/local/cloud-session") {
         if ([...url.searchParams.keys()].length > 0) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Cloud session routes do not accept query parameters");
@@ -1961,6 +1974,8 @@ export function createTaskboardServer(options = {}) {
               remoteUrl: config.remoteUrl,
               actorName: config.actorName,
               ...(config.deviceId ? { deviceId: config.deviceId } : {}),
+              ...(config.userSession && Date.parse(config.userSession.expiresAt) > Date.now()
+                ? { userActor: config.userSession.actor } : {}),
               authenticated: true,
             }
             : { mode: "local", authenticated: false });

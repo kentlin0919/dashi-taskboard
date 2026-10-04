@@ -248,3 +248,18 @@ export const clientStorage = sqliteTable("client_storage", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+export const deviceUserSessions = sqliteTable("device_user_sessions", {
+  id: text("id").primaryKey(),
+  deviceId: text("device_id").notNull().references(() => devices.id),
+  code: text("code").notNull(),
+  claimHash: text("claim_hash").notNull(),
+  tokenHash: text("token_hash").unique(),
+  actorJson: text("actor_json"),
+  status: text("status").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  sessionExpiresAt: text("session_expires_at"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  check("device_user_sessions_status_valid", sql`${table.status} IN ('pending', 'approved', 'active', 'revoked')`),
+]);

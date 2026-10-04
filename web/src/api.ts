@@ -84,6 +84,7 @@ export function resolveTaskboardWebSocketUrl(path: string): string {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
+  headers.set("X-Taskboard-Client", "taskboard-web");
   if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const method = (init?.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
@@ -868,13 +869,42 @@ export interface DeviceAutomation {
   workspacePath: string | null;
 }
 
-export async function fetchDeviceCloudSession(): Promise<{ remoteUrl?: string; deviceId?: string }> {
+export async function fetchDeviceCloudSession(): Promise<{ remoteUrl?: string; deviceId?: string; userActor?: ActorIdentity }> {
   try {
     return await request("/api/local/cloud-session");
   } catch (error) {
     if (error instanceof ApiError && (error.code === "LOCAL_COMPANION_REQUIRED" || error.code === "LOCAL_ONLY" || error.status === 404)) return {};
     throw error;
   }
+}
+
+export interface CloudUserSession {
+  available: boolean;
+  actor: ActorIdentity | null;
+  expiresAt: string | null;
+  pending: { id: string; code: string; expiresAt: string; verificationUrl: string } | null;
+}
+
+export function getCloudUserSession(): Promise<CloudUserSession> {
+  return request("/api/local/user-session");
+}
+export function startCloudUserLogin(): Promise<CloudUserSession> {
+  return request("/api/local/user-session", { method: "POST" });
+}
+export function claimCloudUserLogin(): Promise<CloudUserSession> {
+  return request("/api/local/user-session/claim", { method: "POST" });
+}
+export function logoutCloudUser(): Promise<CloudUserSession> {
+  return request("/api/local/user-session", { method: "DELETE" });
+}
+export function getCloudActor(): Promise<{ actor: ActorIdentity }> {
+  return request("/api/actor");
+}
+export function getCloudLoginRequest(id: string): Promise<{ code: string; deviceName: string; status: string; actor: ActorIdentity }> {
+  return request(`/api/device-user-logins/${encodeURIComponent(id)}`);
+}
+export function approveCloudUserLogin(id: string, code: string): Promise<{ ok: boolean }> {
+  return request(`/api/device-user-logins/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ code }) });
 }
 
 export async function fetchDevices(): Promise<Device[]> {

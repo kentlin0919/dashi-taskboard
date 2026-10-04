@@ -1,4 +1,5 @@
 import { Toasts, showToast, dismissUndoToast } from "./components/Toasts";
+import { CloudUserSessionPanel } from "./components/CloudUserSessionPanel";
 import { agentPlatformLabel, sessionResumeCommand } from "./agentSessions";
 import { resolveInlineAttachments } from "./inlineAttachments";
 import {
@@ -748,6 +749,7 @@ export function App() {
   const [developmentScanLoading, setDevelopmentScanLoading] = useState(false);
   const [manageTaskboardSkillPath, setManageTaskboardSkillPath] = useState("");
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
+  const [cloudUserActor, setCloudUserActor] = useState<ActorIdentity | null>(null);
   const [localAiChatAvailable, setLocalAiChatAvailable] = useState(false);
   const [aiImportReadyProjectId, setAiImportReadyProjectId] = useState<string | null>(null);
   const [aiThreads, setAiThreads] = useState<AiChatThread[]>([]);
@@ -1086,10 +1088,13 @@ export function App() {
   useLayoutEffect(() => {
     if (selectedProject) rememberProjectOpen(selectedProject.id);
   }, [rememberProjectOpen, selectedProject]);
-  const currentUser = hostContext?.user ?? {
+  const currentUser = taskboardMetadata?.mode === "cloud"
+    ? cloudUserActor ?? { ...DEFAULT_USER_ACTOR, id: "cloud-login-required", name: text("請登入雲端帳號", "Sign in to cloud account") }
+    : hostContext?.user ?? {
     ...DEFAULT_USER_ACTOR,
     name: text("本地用户", "Local user"),
   };
+  useEffect(() => { setCurrentUserActor(currentUser); }, [currentUser]);
   const selectedDeviceWorkspacePath = selectedProjectId === GLOBAL_PROJECT_ID || isAllProjects
     ? undefined
     : deviceWorkspacePaths[selectedProjectId];
@@ -1942,7 +1947,6 @@ export function App() {
       if (message.type !== "taskboard:host-context" || !message.payload) return;
       const payload = message.payload as HostContext;
       setHostContext(payload);
-      setCurrentUserActor(payload.user);
       if (isTheme(payload.theme)) setTheme(payload.theme);
       if (host === "codex") void publishHostRuntime(payload);
     }
@@ -3449,6 +3453,8 @@ export function App() {
   return (
     <TaskboardLanguageProvider language={language}>
       <div className={`app-shell${embedded ? " embedded" : ""}`} style={appShellStyle}>
+      <CloudUserSessionPanel cloud={taskboardMetadata?.mode === "cloud"}
+        local={taskboardMetadata?.localCapabilities?.available === true} onActorChange={setCloudUserActor} />
       {taskboardMetadata && taskboardMetadata.mode !== "cloud" && (
         <LocalRealtimeSync
           selectedProjectId={taskScopeProjectId}
