@@ -1,0 +1,116 @@
+name: Publish owned macOS App
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the built version to GitHub Releases
+        type: boolean
+        default: false
+  push:
+    branches: [codex/action-app-release]
+    paths: [.github/workflows/publish-owned-app.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owned-macos-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 22
+          cache: npm
+      - name: Check release version and signing key
+        env:
+          UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PUBLISH: ${{ inputs.publish || false }}
+        run: |
+          set -euo pipefail
+          test -n "$UPDATER_KEY" || { echo 'Missing TAURI_SIGNING_PRIVATE_KEY repository secret' >&2; exit 1; }
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo 'Published releases must be built from main' >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const version = JSON.parse(fs.readFileSync('package.json')).version;
+          const tauri = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json'));
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version = "([^"]+)"/m)[1];
+          if (!/^\d+\.\d+\.\d+$/.test(version) || version !== tauri.version || version !== cargo) throw new Error('Version fields disagree');
+          fs.appendFileSync(process.env.GITHUB_ENV, `APP_VERSION=${version}\nRELEASE_TAG=v${version}\n`);
+          NODE
+      - name: Set up Rust
+        run: rustup update stable --no-self-update && rustup target add --toolchain stable aarch64-apple-darwin x86_64-apple-darwin
+      - run: npm ci
+      - run: npm run app:prepare -- --target universal-apple-darwin
+      - name: Build universal App
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: >-
+          CI=true node scripts/tauri-build.mjs --target universal-apple-darwin
+          --bundles app --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Sign App and create DMG
+        run: |
+          set -euo pipefail
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Taskboard.app"
+          codesign --force --sign - --entitlements src-tauri/Entitlements.plist "$APP_PATH/Contents/MacOS/codex-taskboard-launcher"
+          codesign --force --sign - --entitlements src-tauri/Entitlements.plist "$APP_PATH"
+          codesign --verify --deep --strict "$APP_PATH"
+          mkdir -p release dmg-layout
+          ditto "$APP_PATH" 'dmg-layout/Codex Taskboard.app'
+          ln -s /Applications dmg-layout/Applications
+          hdiutil create -volname 'Codex Taskboard' -srcfolder dmg-layout -ov -format UDZO "release/Codex.Taskboard_${APP_VERSION}_macOS-universal.dmg"
+      - name: Create and verify signed updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node scripts/create-macos-updater.mjs 'src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Taskboard.app' release "$RELEASE_TAG"
+          node -e "require('fs').writeFileSync(process.env.RUNNER_TEMP+'/updater.pub',require('./src-tauri/tauri.conf.json').plugins.updater.pubkey)"
+          node scripts/verify-updater-signature.mjs "$RUNNER_TEMP/updater.pub" "release/Codex.Taskboard_${APP_VERSION}_universal.app.tar.gz" "release/Codex.Taskboard_${APP_VERSION}_universal.app.tar.gz.sig"
+          cd release
+          shasum -a 256 *.dmg *.tar.gz *.sig latest.json > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: owned-macos-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main' }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: owned-macos-release
+          path: release
+      - name: Verify artifacts and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c SHA256SUMS
+          VERSION="$(jq -r .version latest.json)"
+          TAG="v$VERSION"
+          DMG="Codex.Taskboard_${VERSION}_macOS-universal.dmg"
+          printf '%s\n' 'APP 選單支援更新 APP；人工操作使用雲端使用者身分。' 'macOS Universal，採用更新包簽章與 ad-hoc App 簽章，尚未 Apple notarization。' > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" "$DMG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "Codex Taskboard $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release upload "$TAG" *.tar.gz *.sig latest.json SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,tagName,isDraft,assets >> "$GITHUB_STEP_SUMMARY"
