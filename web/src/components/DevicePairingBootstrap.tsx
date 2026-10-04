@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  approvePairingRequest,
   claimDevicePairingCode,
   requestDevicePairingCode,
 } from "../api";
@@ -37,7 +38,7 @@ export function DevicePairingBootstrap({
 }: DevicePairingBootstrapProps) {
   const [pairingCode, setPairingCode] = useState("");
   const [started, setStarted] = useState(false);
-  const [message, setMessage] = useState("請確認後開始配對。 / Start pairing when you are ready.");
+  const [message, setMessage] = useState("確認後將自動配對這台電腦。 / Confirm to pair this computer automatically.");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -50,7 +51,9 @@ export function DevicePairingBootstrap({
         const pairing = await requestDevicePairingCode(deviceName);
         if (cancelled) return;
         setPairingCode(pairing.pairingCode);
-        setMessage("請在主要裝置的「裝置管理」中核准此配對碼。 / Approve this code in Device Management on your main device.");
+        setMessage("正在核准這台電腦並連接本機 APP… / Approving this computer and connecting the local app…");
+        await approvePairingRequest(pairing.pairingCode);
+        if (cancelled) return;
 
         const expiresAt = new Date(pairing.expiresAt).getTime();
         while (!cancelled && Date.now() < expiresAt) {
@@ -113,17 +116,19 @@ export function DevicePairingBootstrap({
     <main style={{ maxWidth: 560, margin: "12vh auto", padding: 24, fontFamily: "system-ui, sans-serif" }}>
       <h1>連接此裝置 / Connect this device</h1>
       <p>{message}</p>
+      <p>{deviceName}</p>
+      {!started && <p>按下配對後，此電腦將取得目前任務面板的裝置憑證，可讀寫任務並取得此裝置的排程。請確認這是你正在操作的電腦。 / Pairing gives this computer access to tasks and its device schedules. Confirm this is your computer.</p>}
       {!started && (
         <button
           type="button"
-          className="primary-button"
+          className="button primary"
           onClick={() => {
             setError("");
             setMessage("正在向任務面板申請配對… / Requesting device pairing…");
             setStarted(true);
           }}
         >
-          {error ? "重新開始 / Try again" : "開始配對 / Start pairing"}
+          {error ? "重新開始 / Try again" : "配對這台電腦 / Pair this computer"}
         </button>
       )}
       {pairingCode && (

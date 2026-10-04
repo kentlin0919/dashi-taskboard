@@ -24,6 +24,18 @@ export function DeviceManagementDialog({
   const [requests, setRequests] = useState<PairingRequest[]>([]);
   const [loading, setLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [commandCopied, setCommandCopied] = useState(false);
+  const pairingCommand = `taskctl device pair --url ${JSON.stringify(window.location.origin)}`;
+
+  async function copyPairingCommand() {
+    setActionError(null);
+    try {
+      await navigator.clipboard.writeText(pairingCommand);
+      setCommandCopied(true);
+    } catch {
+      setActionError(text("無法寫入剪貼簿，請選取下方指令後複製。", "Could not copy. Select and copy the command below."));
+    }
+  }
 
   async function loadData() {
     try {
@@ -40,6 +52,7 @@ export function DeviceManagementDialog({
 
   useEffect(() => {
     if (!open) return;
+    setCommandCopied(false);
     setLoading(true);
     loadData().finally(() => setLoading(false));
     const interval = setInterval(loadData, 3000);
@@ -96,7 +109,7 @@ export function DeviceManagementDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="device-management-title"
-        style={{ maxWidth: 640 }}
+        style={{ width: "min(640px, 100%)", maxHeight: "85vh", overflowY: "auto", boxSizing: "border-box" }}
         onKeyDown={(event) => {
           if (event.key === "Escape") onClose();
         }}
@@ -121,13 +134,33 @@ export function DeviceManagementDialog({
           </div>
         )}
 
-        <div style={{ marginTop: 16 }}>
+        <div style={{ display: "block", marginTop: 16 }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+            {text("新增這台電腦", "Connect this computer")}
+          </h3>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+            {text("先開啟 Codex Taskboard APP，再複製指令到這台電腦的終端機執行。瀏覽器會開啟目前網站，按下「配對這台電腦」後自動完成配對。", "Open the Codex Taskboard app, then run this command in this computer's terminal. Your browser will open this site. Confirm Pair this computer to finish automatically.")}
+          </p>
+          <textarea
+            aria-label={text("裝置配對指令", "Device pairing command")}
+            readOnly
+            value={pairingCommand}
+            rows={3}
+            onFocus={(event) => event.currentTarget.select()}
+            style={{ width: "100%", boxSizing: "border-box", resize: "none", fontFamily: "monospace", fontSize: 13, padding: 10, borderRadius: 6, background: "var(--surface)", color: "var(--text-primary)", border: "1px solid var(--border-strong)" }}
+          />
+          <button type="button" className="button primary" onClick={copyPairingCommand} style={{ marginTop: 8 }}>
+            {commandCopied ? text("已複製", "Copied") : text("複製配對指令", "Copy pairing command")}
+          </button>
+        </div>
+
+        <div style={{ display: "block", marginTop: 16 }}>
           <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
             {text("待確認的配對請求", "Pending Pairing Requests")}
           </h3>
           {requests.length === 0 ? (
-            <div style={{ color: "var(--color-text-secondary)", fontSize: 13 }}>
-              {text("目前沒有待處理的配對碼。在電腦終端機執行 `taskctl device pair --url <Site網址>` 開始配對。", "No pending requests. Run `taskctl device pair --url <SiteUrl>` on your computer.")}
+            <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+              {text("目前沒有待處理的配對碼，請使用上方指令開始配對。", "No pending requests. Use the command above to start pairing.")}
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -139,23 +172,23 @@ export function DeviceManagementDialog({
                     alignItems: "center",
                     justifyContent: "space-between",
                     padding: "8px 12px",
-                    background: "var(--color-bg-secondary)",
+                    background: "var(--surface)",
                     borderRadius: 6,
-                    border: "1px solid var(--color-border)",
+                    border: "1px solid var(--border-strong)",
                   }}
                 >
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 14 }}>
                       {req.device_name}
                     </div>
-                    <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2 }}>
                       {text("配對碼", "Code")}: <strong style={{ letterSpacing: 1 }}>{req.pairing_code}</strong> · {text("有效期至", "Expires")}: {new Date(req.expires_at).toLocaleTimeString()}
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       type="button"
-                      className="primary-button"
+                      className="button primary"
                       style={{ padding: "4px 10px", fontSize: 12 }}
                       onClick={() => handleApprove(req.pairing_code)}
                     >
@@ -163,7 +196,7 @@ export function DeviceManagementDialog({
                     </button>
                     <button
                       type="button"
-                      className="danger-button"
+                      className="button danger"
                       style={{ padding: "4px 10px", fontSize: 12 }}
                       onClick={() => handleReject(req.pairing_code)}
                     >
@@ -176,12 +209,12 @@ export function DeviceManagementDialog({
           )}
         </div>
 
-        <div style={{ marginTop: 24 }}>
+        <div style={{ display: "block", marginTop: 24 }}>
           <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
             {text("已配對裝置", "Paired Devices")}
           </h3>
           {devices.length === 0 ? (
-            <div style={{ color: "var(--color-text-secondary)", fontSize: 13 }}>
+            <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
               {text("尚未配對任何裝置。", "No paired devices.")}
             </div>
           ) : (
@@ -200,9 +233,9 @@ export function DeviceManagementDialog({
                       alignItems: "center",
                       justifyContent: "space-between",
                       padding: "8px 12px",
-                      background: "var(--color-bg-secondary)",
+                      background: "var(--surface)",
                       borderRadius: 6,
-                      border: "1px solid var(--color-border)",
+                      border: "1px solid var(--border-strong)",
                       opacity: isRevoked ? 0.6 : 1,
                     }}
                   >
@@ -219,12 +252,12 @@ export function DeviceManagementDialog({
                         />
                         <strong style={{ fontSize: 14 }}>{device.name}</strong>
                         {isRevoked && (
-                          <span style={{ fontSize: 11, color: "var(--color-text-danger)", border: "1px solid currentColor", borderRadius: 4, padding: "1px 4px" }}>
+                          <span style={{ fontSize: 11, color: "var(--danger)", border: "1px solid currentColor", borderRadius: 4, padding: "1px 4px" }}>
                             {text("已撤銷", "Revoked")}
                           </span>
                         )}
                       </div>
-                      <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 4 }}>
+                      <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>
                         <span>ID: {device.id}</span>
                         {" · "}
                         <span>
@@ -244,7 +277,7 @@ export function DeviceManagementDialog({
                     {!isRevoked && (
                       <button
                         type="button"
-                        className="danger-button"
+                        className="button danger"
                         style={{ padding: "4px 10px", fontSize: 12 }}
                         onClick={() => handleRevoke(device.id)}
                       >
@@ -259,7 +292,7 @@ export function DeviceManagementDialog({
         </div>
 
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 24 }}>
-          <button type="button" className="secondary-button" onClick={onClose}>
+          <button type="button" className="button" onClick={onClose}>
             {text("關閉", "Close")}
           </button>
         </div>
