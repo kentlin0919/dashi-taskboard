@@ -8,6 +8,8 @@ export async function runDeviceAgent({
   fetch: fetchFn = globalThis.fetch,
   applyAutomation,
   models,
+  readStatus,
+  onAutomationError,
   intervalSeconds = 30,
   once = false,
   stderr = process.stderr,
@@ -53,9 +55,16 @@ export async function runDeviceAgent({
           await applyAutomation(automation);
         } catch (error) {
           await applyAutomation({ ...automation, enabledByUser: false });
+          await onAutomationError?.(automation.projectId, error);
           failures.push(automation.projectId);
           stderr.write(`專案 ${automation.projectId} 未啟用，${error.message}\n`);
         }
+      }
+      if (readStatus) {
+        const report = await fetchFn(`${credentials.siteUrl}/api/devices/${encodeURIComponent(credentials.deviceId)}/heartbeat`, {
+          method: "POST", headers, body: JSON.stringify({ status: await readStatus() }),
+        });
+        if (!report.ok) throw new Error(`Device status report returned HTTP ${report.status}`);
       }
       return {
         success: failures.length === 0,

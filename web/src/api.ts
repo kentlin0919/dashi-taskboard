@@ -830,10 +830,30 @@ export interface PairingRequest {
   created_at: string;
 }
 
+export interface DeviceScheduleState {
+  status: "ACTIVE" | "PAUSED" | "UNKNOWN";
+  automationId?: string | null;
+  checkedAt?: string;
+  nextRunAt?: number | null;
+  idleReason?: "checking-todos" | "waiting-todos" | "no-todos" | null;
+  error?: string;
+  quota?: { state: string; checkedAt?: number; resetsAt?: number } | null;
+  appliedSettings?: {
+    enabledByUser: boolean;
+    quotaAware: boolean;
+    intervalMinutes: number;
+    model: string;
+    reasoningEffort: string;
+    workspacePath: string;
+  };
+}
+
 export interface DeviceAutomation {
   deviceId: string;
   deviceName: string;
   deviceStatus: "active" | "revoked";
+  scheduleState: DeviceScheduleState | null;
+  canManage?: boolean;
   lastHeartbeatAt: string | null;
   lastStatus: {
     isRunning?: boolean;

@@ -130,7 +130,6 @@ export function ProjectAutomationMenu({
   const isOnline = currentDevice?.lastHeartbeatAt
     ? Date.now() - new Date(currentDevice.lastHeartbeatAt).getTime() < 120_000
     : false;
-  const isDeviceRunning = Boolean(currentDevice?.lastStatus?.isRunning);
 
   const status = automation?.status ?? "PAUSED";
   const quota = automation?.quota;
@@ -140,14 +139,29 @@ export function ProjectAutomationMenu({
       ? text("等待任务条件", "Waiting for task conditions")
       : null;
 
+  const deviceSchedule = currentDevice?.scheduleState;
+  const applied = deviceSchedule?.appliedSettings;
+  const synchronized = Boolean(currentDevice && applied && deviceSchedule?.checkedAt
+    && Date.now() - new Date(deviceSchedule.checkedAt).getTime() < 120_000
+    && applied.enabledByUser === currentDevice.enabledByUser
+    && applied.quotaAware === currentDevice.quotaAware
+    && applied.intervalMinutes === currentDevice.intervalMinutes
+    && (!currentDevice.model || applied.model === currentDevice.model)
+    && (!currentDevice.reasoningEffort || applied.reasoningEffort === currentDevice.reasoningEffort)
+    && applied.workspacePath === currentDevice.workspacePath);
+  const devicePauseReason = deviceSchedule?.error
+    ?? (deviceSchedule?.idleReason === "checking-todos" ? text("正在判斷待辦，排程暫停。", "Checking todos; schedule paused.")
+      : deviceSchedule?.idleReason === "waiting-todos" ? text("待辦需要等待，條件解除後重新判斷。", "Tasks must wait; conditions will be checked again.")
+      : deviceSchedule?.idleReason === "no-todos" ? text("目前沒有待辦任務。", "No todo tasks.")
+      : currentDevice?.quotaAware && deviceSchedule?.quota?.state !== "available" ? text("額度尚未確認可用，排程暫停。", "Quota is not confirmed available; schedule paused.")
+      : text("裝置排程已暫停。", "Device schedule paused."));
   const stateLabel = currentDevice
-    ? !currentDevice.enabledByUser
-      ? text("已暂停", "Paused")
-      : isDeviceRunning
-        ? text("正在执行", "Running")
-        : isOnline
-          ? text(`排程已设定（每 ${currentDevice.intervalMinutes} 分钟）`, `Scheduled (${currentDevice.intervalMinutes} min)`)
-          : text("设备离线", "Device offline")
+    ? !isOnline ? text("设备离线", "Device offline")
+      : !synchronized ? text("等待裝置同步", "Waiting for device sync")
+      : deviceSchedule?.error ? text("裝置套用失敗", "Device apply failed")
+      : deviceSchedule?.status === "ACTIVE" ? text("裝置排程已啟動", "Device schedule active")
+      : deviceSchedule?.status === "PAUSED" ? text("裝置排程已暫停", "Device schedule paused")
+      : text("排程狀態未確認", "Schedule status unknown")
     : (idleLabel ?? (!automation?.enabledByUser
       ? text("已暂停", "Paused")
       : automation.quotaAware && quota?.state === "blocked"
@@ -161,7 +175,7 @@ export function ProjectAutomationMenu({
               : text("已暂停", "Paused")));
   const availableModels = currentDevice ? currentDevice.lastStatus?.models ?? [] : models;
   const selectedModel = availableModels.find((model) => model.slug === draft.model) ?? availableModels[0];
-  const disabled = pending || (deviceMode && !currentDevice) || (!currentDevice && (!selectedModel || Boolean(unavailableReason)));
+  const disabled = pending || currentDevice?.canManage === false || (deviceMode && !currentDevice) || (!currentDevice && (!selectedModel || Boolean(unavailableReason)));
 
   useEffect(() => {
     if (!open) return;
@@ -243,14 +257,14 @@ export function ProjectAutomationMenu({
       className="project-automation-menu no-drag"
       role="dialog"
       aria-label={text("自动认领待办设置", "Auto-claim settings")}
-      style={{ left: position.left, top: position.top, visibility: position.ready ? "visible" : "hidden" }}
+      style={{ left: position.left, top: position.top, visibility: position.ready ? "visible" : "hidden", maxHeight: "calc(100vh - 16px)", overflowY: "auto" }}
     >
       {deviceMode && !currentDevice && !pending && !error && (
         <p>{text("请先新增并配对设备，再设定自动认领。", "Add and pair a device before setting auto-claim.")}</p>
       )}
       <div className="project-automation-menu-heading">
         <strong>{text("自动认领待办", "Auto-claim tasks")}</strong>
-        <span className={isDeviceRunning || status === "ACTIVE" ? "is-active" : "is-paused"}>
+        <span className={(currentDevice ? synchronized && isOnline && deviceSchedule?.status === "ACTIVE" : status === "ACTIVE") ? "is-active" : "is-paused"}>
           {stateLabel}
         </span>
       </div>
@@ -445,6 +459,24 @@ export function ProjectAutomationMenu({
             />
           </div>
         </>
+      )}
+      {currentDevice && (
+        <div className="project-automation-note" role="status" style={{ overflowWrap: "anywhere" }}>
+          {currentDevice.canManage === false && <p>{text("目前以裝置身分連線，設定請在雲端網站登入後修改。", "Connected as a device; sign in to the cloud website to change settings.")}</p>}
+          <p>{text("雲端設定", "Cloud setting")} · {currentDevice.enabledByUser ? text("自動認領已開啟", "Auto-claim enabled") : text("自動認領已關閉", "Auto-claim disabled")}</p>
+          <p>{text("裝置排程", "Device schedule")} · {isOnline && synchronized ? deviceSchedule?.status ?? "UNKNOWN" : text("尚未確認", "Unconfirmed")}</p>
+          {!synchronized && <p>{text("等待裝置回報與目前設定相符的結果。", "Waiting for the device to confirm the current settings.")}</p>}
+          {deviceSchedule?.error && <p role="alert">{deviceSchedule.error}</p>}
+          {synchronized && deviceSchedule?.status === "PAUSED" && <p>{devicePauseReason}</p>}
+          <p>{text("最後心跳", "Last heartbeat")} · {currentDevice.lastHeartbeatAt ? new Date(currentDevice.lastHeartbeatAt).toLocaleString(locale) : text("尚無回報", "Not reported")}</p>
+          <p>{text("排程確認時間", "Schedule confirmed at")} · {deviceSchedule?.checkedAt ? new Date(deviceSchedule.checkedAt).toLocaleString(locale) : text("尚無回報", "Not reported")}</p>
+          <p>{text("下次執行", "Next run")} · {isOnline && synchronized && deviceSchedule?.status === "ACTIVE" && deviceSchedule.nextRunAt ? new Date(deviceSchedule.nextRunAt).toLocaleString(locale) : text("尚未安排", "Not scheduled")}</p>
+          <p>{text("額度狀態", "Quota state")} · {deviceSchedule?.quota?.state ?? text("尚未回報", "Not reported")}</p>
+          {deviceSchedule?.quota?.resetsAt && <p>{text("額度重置時間", "Quota reset")} · {new Date(deviceSchedule.quota.resetsAt * 1000).toLocaleString(locale)}</p>}
+          {applied && <p>{text("裝置已套用", "Applied on device")} · {applied.model} · {applied.reasoningEffort} · {text(`${applied.intervalMinutes} 分鐘`, `${applied.intervalMinutes} min`)}</p>}
+          {applied && <p>{text("執行目錄", "Workspace")} · {applied.workspacePath}</p>}
+          {deviceSchedule?.automationId && <p>{text("排程 ID", "Schedule ID")} · {deviceSchedule.automationId}</p>}
+        </div>
       )}
       {idleLabel && (
         <p className="project-automation-note" role="status">

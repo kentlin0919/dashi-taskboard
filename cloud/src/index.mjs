@@ -2785,7 +2785,7 @@ async function recordDeviceHeartbeat(deviceId, request, env, actor) {
   return json(200, { ok: true, deviceId, automations });
 }
 
-async function listProjectDeviceAutomations(projectId, env) {
+async function listProjectDeviceAutomations(projectId, env, deviceId = null) {
   validateProjectId(projectId);
   const result = await env.DB.prepare(`
     SELECT d.id AS deviceId, d.name AS deviceName, d.status AS deviceStatus,
@@ -2799,9 +2799,9 @@ async function listProjectDeviceAutomations(projectId, env) {
     FROM devices d
     LEFT JOIN device_automations a ON d.id = a.device_id AND a.project_id = ?
     LEFT JOIN device_project_mappings m ON d.id = m.device_id AND m.project_id = ?
-    WHERE d.status = 'active'
+    WHERE d.status = 'active' AND (? IS NULL OR d.id = ?)
     ORDER BY d.created_at ASC
-  `).bind(projectId, projectId).all();
+  `).bind(projectId, projectId, deviceId, deviceId).all();
 
   const automations = result.results.map((row) => {
     let lastStatus = null;
@@ -2811,6 +2811,8 @@ async function listProjectDeviceAutomations(projectId, env) {
     return {
       deviceId: row.deviceId,
       deviceName: row.deviceName,
+      scheduleState: lastStatus?.automations?.[projectId] ?? null,
+      canManage: !deviceId,
       deviceStatus: row.deviceStatus,
       lastHeartbeatAt: row.lastHeartbeatAt,
       lastStatus,
@@ -3153,6 +3155,10 @@ async function routeApi(request, env, actor, url) {
       && pathname !== selfRevokePath
     ) {
       throw new ApiError(403, "FORBIDDEN", "Device cannot manage other devices");
+    }
+    const selfAutomations = pathname.match(/^\/api\/projects\/([^/]+)\/devices\/automations$/);
+    if (selfAutomations && request.method === "GET") {
+      return listProjectDeviceAutomations(decodeURIComponent(selfAutomations[1]), env, actor.deviceId);
     }
     if (pathname.includes("/devices/automations") || pathname.includes("/automation")) {
       throw new ApiError(403, "FORBIDDEN", "Device cannot manage automations");

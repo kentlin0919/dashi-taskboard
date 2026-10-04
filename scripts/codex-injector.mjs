@@ -1980,7 +1980,7 @@ function storedAutomationPolicy(request) {
 
 function restoredAutomationPolicy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { nextRunAt, quota, todoGate, deviceId, ...stored } = value;
+  const { nextRunAt, quota, todoGate, deviceId, runtime, ...stored } = value;
   const request = parseTaskboardAutomationHostRequest({
     ...stored,
     id: "restored-policy",
@@ -2032,6 +2032,7 @@ function persistQuotaPolicies() {
         ...(record.deviceId ? { deviceId: record.deviceId } : {}),
         ...(record.quota ? { quota: record.quota } : {}),
         ...(record.todoGate ? { todoGate: record.todoGate } : {}),
+        ...(record.runtime ? { runtime: record.runtime } : {}),
         ...(Number.isFinite(record.nextRunAt) ? { nextRunAt: record.nextRunAt } : {}),
       },
     ]),
@@ -2162,6 +2163,22 @@ function enqueueQuotaPolicyMutation(record, rpc, { explicit = false, evaluatedTo
       else delete current.todoGate;
       if (current.request.quotaAware && result.quota) current.quota = result.quota;
       else if (!current.request.quotaAware) delete current.quota;
+      current.runtime = {
+        status: result.item?.status ?? "UNKNOWN",
+        automationId: result.item?.id ?? current.request.automationId ?? null,
+        checkedAt: new Date().toISOString(),
+        nextRunAt: result.item?.nextRunAt ?? null,
+        idleReason: result.idleReason ?? (result.hasTodo === false ? "no-todos" : null),
+        quota: current.quota ?? null,
+        appliedSettings: {
+          enabledByUser: current.request.enabledByUser,
+          quotaAware: current.request.quotaAware,
+          intervalMinutes: current.request.intervalMinutes,
+          model: current.request.model,
+          reasoningEffort: current.request.reasoningEffort,
+          workspacePath: current.request.workspacePath,
+        },
+      };
       await persistQuotaPolicies();
       scheduleQuotaPolicyCheck(current, result);
       return result;
@@ -2271,6 +2288,17 @@ async function synchronizeDevicePolicies() {
     }
     const result = await runDeviceAgent({
       credentials, once: true, models: deviceModels,
+      readStatus: () => ({
+        automations: Object.fromEntries([...quotaPolicyRecords].filter(([, record]) => record.deviceId === credentials.deviceId).map(([id, record]) => [id, record.runtime ?? { status: "UNKNOWN" }])),
+      }),
+      onAutomationError: async (projectId, error) => {
+        const record = quotaPolicyRecords.get(projectId);
+        if (record) {
+          record.deviceId = credentials.deviceId;
+          record.runtime = { ...record.runtime, error: error.message, checkedAt: new Date().toISOString() };
+          await persistQuotaPolicies();
+        }
+      },
       applyAutomation: async (automation) => {
         const projectId = automation.projectId;
         if (!companionConfigured) {
@@ -2283,7 +2311,10 @@ async function synchronizeDevicePolicies() {
         }
         const snapshot = JSON.stringify([credentials.siteUrl, credentials.deviceId, automation]);
         if (devicePolicySnapshots.get(projectId) === snapshot
-          && quotaPolicyRecords.get(projectId)?.request.enabledByUser === automation.enabledByUser) return;
+          && quotaPolicyRecords.get(projectId)?.request.enabledByUser === automation.enabledByUser) {
+          await enqueueCurrentQuotaPolicy(projectId);
+          return;
+        }
         if (!automation.enabledByUser) {
           await pauseProject(projectId);
           devicePolicySnapshots.set(projectId, snapshot);
