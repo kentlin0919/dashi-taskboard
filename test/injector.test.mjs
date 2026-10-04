@@ -94,7 +94,7 @@ test("the CDP bridge exposes only the fixed Taskboard automation operations", ()
   assert.match(source, /reconcileTaskboardAutomation/);
   assert.match(runtimeSource, /request\.action === "automation"/);
   assert.match(source, /function requestCodexAutomationViaCdp/);
-  assert.match(source, /new Set\(\[\s*"list-automations",\s*"automation-create",\s*"automation-update",\s*\]\)/);
+  assert.match(source, /new Set\(\[\s*"get-global-state",\s*"list-automations",\s*"automation-create",\s*"automation-update",\s*\]\)/);
   assert.match(source, /bridge\.sendMessageFromView\(\{\s*type: "fetch",\s*requestId,/);
   assert.match(source, /method: "POST"/);
   assert.match(source, /vscode:\/\/codex\/\$\{method\}/);
@@ -343,8 +343,8 @@ test("the injector ignores auxiliary Codex windows", () => {
   assert.match(source, /!target\.url\?\.includes\("initialRoute=%2Fglobal-dictation"\)/);
 });
 
-test("a completed web build refreshes an already-open Codex iframe", () => {
-  assert.match(packageJson.scripts.build, /--refresh-if-running/);
+test("Sites builds are separate from explicit native iframe refresh", () => {
+  assert.equal(packageJson.scripts.build, "npm run build:sites");
   assert.match(packageJson.scripts["codex:refresh"], /--refresh/);
   assert.match(source, /async function refreshTaskboardFrames/);
   assert.match(source, /function codexDebuggingPorts/);

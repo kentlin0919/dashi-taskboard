@@ -240,7 +240,7 @@ export function DeviceManagementDialog({
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {devices.map((device) => {
                 const online = isDeviceOnline(device.last_heartbeat_at);
-                const isRunning = Boolean(device.last_status?.isRunning);
+                const isRunning = device.last_status?.isRunning;
                 const currentTaskId = device.last_status?.currentTaskId;
                 const isRevoked = device.status === "revoked";
 
@@ -285,7 +285,9 @@ export function DeviceManagementDialog({
                             : online
                               ? isRunning
                                 ? text(`正在執行任務：${currentTaskId ?? "處理中"}`, `Running: ${currentTaskId ?? "in progress"}`)
-                                : text("在線（待命）", "Online (Idle)")
+                                : isRunning === false
+                                  ? text("在線（待命）", "Online (Idle)")
+                                  : text("在線（執行狀態未確認）", "Online (Execution status unknown)")
                               : text("離線", "Offline")}
                         </span>
                         {device.last_heartbeat_at && (

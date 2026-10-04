@@ -2759,9 +2759,13 @@ async function recordDeviceHeartbeat(deviceId, request, env, actor) {
   const statusJson = statusPayload ? JSON.stringify(statusPayload) : null;
   const timestamp = now();
   await env.DB.prepare(`
-    UPDATE devices SET last_heartbeat_at = ?, last_status = CASE WHEN ? IS NULL THEN last_status ELSE json_patch(COALESCE(last_status, '{}'), ?) END, updated_at = ?
+    UPDATE devices SET last_heartbeat_at = ?, last_status = CASE
+      WHEN ? IS NULL THEN last_status
+      WHEN json_type(?, '$.automations') = 'object' THEN
+        json_set(json_patch(COALESCE(last_status, '{}'), ?), '$.automations', json_extract(?, '$.automations'))
+      ELSE json_patch(COALESCE(last_status, '{}'), ?) END, updated_at = ?
     WHERE id = ?
-  `).bind(timestamp, statusJson, statusJson, timestamp, deviceId).run();
+  `).bind(timestamp, statusJson, statusJson, statusJson, statusJson, statusJson, timestamp, deviceId).run();
 
   const automationsResult = await env.DB.prepare(`
     SELECT a.project_id AS projectId, a.enabled_by_user AS enabledByUser, a.quota_aware AS quotaAware,

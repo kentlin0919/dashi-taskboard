@@ -65,7 +65,8 @@ test("direct operation path: pair request -> approve -> claim -> heartbeat -> au
     const forbiddenDevList = await harness.request("/api/devices", {
       headers: { authorization: `Bearer ${deviceToken}` },
     });
-    assert.equal(forbiddenDevList.response.status, 403);
+    assert.equal(forbiddenDevList.response.status, 200);
+    assert.deepEqual(forbiddenDevList.body.devices.map((device) => device.id), [deviceId]);
 
     // 5. 裝置以 Bearer Token 發送心跳（回報任務正在執行）
     const runningHeartbeat = await harness.request(`/api/devices/${deviceId}/heartbeat`, {
@@ -119,7 +120,18 @@ test("direct operation path: pair request -> approve -> claim -> heartbeat -> au
       ? JSON.parse(currentDev2.last_status)
       : currentDev2.last_status;
     assert.equal(lastStatus2.isRunning, false);
-    assert.equal(lastStatus2.currentTaskId, null);
+    assert.equal(lastStatus2.currentTaskId, undefined);
+
+    // Full schedule reports replace stale errors while preserving the model catalog.
+    const heartbeat = (status) => harness.request(`/api/devices/${deviceId}/heartbeat`, {
+      method: "POST", headers: { authorization: `Bearer ${deviceToken}` }, json: { status },
+    });
+    await heartbeat({ models: [{ slug: "model-1" }], automations: { local: { error: "invalid workspace", status: "PAUSED" } } });
+    await heartbeat({ automations: { local: { status: "ACTIVE", checkedAt: "fresh" } } });
+    const recovered = await harness.request("/api/devices", { headers: siteOwnerHeaders });
+    const recoveredStatus = recovered.body.devices.find((device) => device.id === deviceId).lastStatus;
+    assert.deepEqual(recoveredStatus.automations, { local: { status: "ACTIVE", checkedAt: "fresh" } });
+    assert.deepEqual(recoveredStatus.models, [{ slug: "model-1" }]);
 
     // 8. 管理者撤銷裝置
     const revokeReq = await harness.request(`/api/devices/${deviceId}/revoke`, {

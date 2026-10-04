@@ -184,6 +184,10 @@ async function host(t, { tasks = [todo("448")], existing = true } = {}) {
   })()`, {
     createHash, path, mkdir, readFile, writeFile, fetch, Date: Clock, setTimeout, clearTimeout,
     console: { error: (message) => errors.push(message) }, process: { pid: 448 },
+    taskboardDataDirectory: directory,
+    devicePolicySyncInFlight: false, devicePolicyTimer: null,
+    devicePolicySnapshots: new Map(), devicePolicyProjects: new Set(),
+    setInterval: () => ({ unref() {} }),
     automationPoliciesPath, taskboardBaseUrl: "http://taskboard.test/isolated",
     taskConversationAppServerTimeoutMs: 30_000, remoteAutomationTurnTimeoutMs: 30 * 60_000,
     codexAutomationRequestSequence: 0, codexAppServerRequestSequence: 0,

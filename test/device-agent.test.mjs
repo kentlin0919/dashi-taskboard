@@ -45,7 +45,7 @@ test("device controller synchronizes native policies without claiming cards or i
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0].headers.get("authorization"), "Bearer device-token");
   assert.equal(harness.calls[0].headers.get("oai-sites-authorization"), "Bearer site-token");
-  assert.equal(harness.calls[0].body.isRunning, false);
+  assert.equal(harness.calls[0].body.status.isRunning, null);
 });
 
 test("one invalid native policy does not pause a different project's valid schedule", async () => {

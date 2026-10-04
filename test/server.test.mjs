@@ -536,7 +536,9 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
           };
         },
       },
-      remoteFetch: async () => new Response(JSON.stringify({ projects: [] }), {
+      remoteFetch: async (url) => new Response(JSON.stringify(new URL(url).pathname === "/api/meta"
+        ? { realtime: { transport: "websocket", endpoint: "/api/events" } }
+        : { projects: [] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
