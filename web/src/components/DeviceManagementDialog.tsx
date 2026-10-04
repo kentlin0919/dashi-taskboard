@@ -55,7 +55,7 @@ export function DeviceManagementDialog({
       const resolvedUrl = new URL(session.remoteUrl || document.baseURI);
       if (!["http:", "https:"].includes(resolvedUrl.protocol)) throw new Error(text("無法取得雲端網站網址。", "Could not resolve the cloud site URL."));
       setSiteUrl(resolvedUrl.origin);
-      setDeviceSession(Boolean(session.deviceId) || reqList === null);
+      setDeviceSession((Boolean(session.deviceId) && !session.userActor) || reqList === null);
       setDevices(devList);
       setRequests(reqList ?? []);
       setLoadError(null);

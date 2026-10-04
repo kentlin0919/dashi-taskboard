@@ -103,11 +103,26 @@ function parseConfig(value) {
     "deviceId",
     "siteAuthorizationToken",
     "projectMappings",
+    "userSession",
+    "pendingUserLogin",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
     throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud companion configuration is invalid");
   }
   const projectMappings = validateProjectMappings(value.projectMappings);
+  const userSession = value.userSession;
+  const pendingUserLogin = value.pendingUserLogin;
+  if (userSession !== undefined && (!userSession || typeof userSession.token !== "string"
+    || !/^ut_[a-f0-9]{64}$/.test(userSession.token) || userSession.actor?.type !== "user"
+    || typeof userSession.actor.id !== "string" || typeof userSession.actor.name !== "string"
+    || !Number.isFinite(Date.parse(userSession.expiresAt)))) {
+    throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud user session is invalid");
+  }
+  if (pendingUserLogin !== undefined && (!pendingUserLogin || typeof pendingUserLogin.id !== "string"
+    || !/^claim_[a-f0-9]{64}$/.test(pendingUserLogin.claimSecret ?? "")
+    || !Number.isFinite(Date.parse(pendingUserLogin.expiresAt)))) {
+    throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud login request is invalid");
+  }
   const siteAuthorizationToken = value.siteAuthorizationToken ?? null;
   if (siteAuthorizationToken !== null && (typeof siteAuthorizationToken !== "string" || !siteAuthorizationToken || /[\r\n]/.test(siteAuthorizationToken))) {
     throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Sites authorization token is invalid");
@@ -125,7 +140,8 @@ function parseConfig(value) {
       throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud device credentials are invalid");
     }
     return { version: CONFIG_VERSION, remoteUrl: normalizeCloudUrl(value.remoteUrl),
-      actorName: value.actorName.trim(), sharedKey: null, deviceToken, deviceId, siteAuthorizationToken, projectMappings };
+      actorName: value.actorName.trim(), sharedKey: null, deviceToken, deviceId, siteAuthorizationToken, projectMappings,
+      ...(userSession ? { userSession } : {}), ...(pendingUserLogin ? { pendingUserLogin } : {}) };
   }
   if (deviceId !== null) throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud device token is required");
   const credentials = validateCredentials(value.actorName, value.sharedKey);
@@ -160,6 +176,13 @@ export function createCloudConfigStore({ configPath }) {
     await rename(temporaryPath, configPath);
   }
 
+  function sameUserLoginState(config, expected) {
+    return expected && config.remoteUrl === expected.remoteUrl
+      && config.deviceId === expected.deviceId && config.deviceToken === expected.deviceToken
+      && config.userSession?.token === expected.userSession?.token
+      && config.pendingUserLogin?.id === expected.pendingUserLogin?.id;
+  }
+
   function update(mutator) {
     const operation = pendingWrite.then(async () => {
       const next = mutator(await readFromDisk());
@@ -185,6 +208,8 @@ export function createCloudConfigStore({ configPath }) {
         remoteUrl: normalizedUrl,
         ...credentials,
         siteAuthorizationToken,
+        userSession: config.remoteUrl === normalizedUrl && config.deviceId === deviceId ? config.userSession : undefined,
+        pendingUserLogin: config.remoteUrl === normalizedUrl && config.deviceId === deviceId ? config.pendingUserLogin : undefined,
       }));
     },
     clearCloud() {
@@ -195,7 +220,28 @@ export function createCloudConfigStore({ configPath }) {
         sharedKey: null,
         deviceToken: null, deviceId: null,
         siteAuthorizationToken: null,
+        userSession: undefined, pendingUserLogin: undefined,
       }));
+    },
+    setUserLogin(pendingUserLogin, expectedConfig) {
+      return update((config) => {
+        if (!sameUserLoginState(config, expectedConfig)) {
+          throw new CloudConfigError("LOGIN_CHANGED", "Cloud connection or login changed; try again");
+        }
+        return { ...config, pendingUserLogin };
+      });
+    },
+    setUserSession(userSession, expectedLoginId, expectedConfig) {
+      return update((config) => {
+        if (expectedConfig && !sameUserLoginState(config, expectedConfig)) {
+          if (!userSession) return config;
+          throw new CloudConfigError("LOGIN_CHANGED", "Cloud connection or login changed; try again");
+        }
+        if (expectedLoginId && config.pendingUserLogin?.id !== expectedLoginId) {
+          throw new CloudConfigError("LOGIN_CHANGED", "Login request changed; try again");
+        }
+        return { ...config, userSession, pendingUserLogin: undefined };
+      });
     },
     setProjectWorkspace(projectId, workspacePath) {
       if (typeof projectId !== "string" || !projectId.trim()) {

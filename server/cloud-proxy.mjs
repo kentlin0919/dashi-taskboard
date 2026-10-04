@@ -270,7 +270,13 @@ export function createCloudProxy({
       for (const name of [...headers.keys()]) {
         if (name.toLowerCase().startsWith("x-taskboard-user-")) headers.delete(name);
       }
-      headers.set("authorization", cloudAuthorization(config));
+      const humanRequest = request.headers.get("x-taskboard-client") === "taskboard-web";
+      const validUserSession = config.userSession && Date.parse(config.userSession.expiresAt) > Date.now();
+      if (humanRequest && config.deviceToken && !validUserSession && !["GET", "HEAD"].includes(request.method)) {
+        throw new CloudProxyError(401, "CLOUD_USER_LOGIN_REQUIRED", "Sign in to your cloud account before making changes");
+      }
+      headers.set("authorization", humanRequest && validUserSession
+        ? `Bearer ${config.userSession.token}` : cloudAuthorization(config));
       headers.delete("OAI-Sites-Authorization");
       if (config.siteAuthorizationToken) headers.set("OAI-Sites-Authorization", `Bearer ${config.siteAuthorizationToken}`);
 

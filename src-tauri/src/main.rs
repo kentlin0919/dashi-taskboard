@@ -75,7 +75,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const LAUNCHER_STOP_TIMEOUT: Duration = Duration::from_secs(36);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const BETA_UPDATER_ENDPOINT: &str =
-    "https://raw.githubusercontent.com/chuspeeism/dashi-taskboard/beta-updater/latest.json";
+    "https://raw.githubusercontent.com/kentlin0919/dashi-taskboard/beta-updater/latest.json";
 // Unique whole-directory snapshots shipped from app-v0.2.0 through v1.1.2.
 const KNOWN_TASKBOARD_SKILL_DIGESTS: [&str; 6] = [
     "eeaaa5d71a2c47688bf62a5eb9f45e9138fe49eb636a46cfd6af8a0f8853e2e0",
@@ -1981,7 +1981,7 @@ async fn check_for_startup_update(
     state: &Arc<LauncherState>,
 ) -> Result<Option<Update>, String> {
     update_snapshot(app, state, |snapshot| {
-        snapshot.update_message = "正在检查更新…".into();
+        snapshot.update_message = "正在檢查 APP 更新…".into();
         snapshot.update_available = false;
     });
     let beta_release = is_beta_release();
@@ -2224,7 +2224,7 @@ fn finish_update_flow(
     quit: &MenuItem<tauri::Wry>,
 ) {
     state.update_in_progress.store(false, Ordering::SeqCst);
-    check_update.set_text("检查更新").unwrap();
+    check_update.set_text("更新 APP").unwrap();
     check_update.set_enabled(true).unwrap();
     quit.set_enabled(true).unwrap();
     state.update_flow_in_progress.store(false, Ordering::SeqCst);
@@ -2243,7 +2243,7 @@ async fn offer_update(
             snapshot.update_available = false;
         });
         check_update
-            .set_text("检查更新（Windows 暂不支持）")
+            .set_text("更新 APP（Windows 暫不支援）")
             .unwrap();
         check_update.set_enabled(false).unwrap();
         return;
@@ -2256,7 +2256,7 @@ async fn offer_update(
         {
             return;
         }
-        check_update.set_text("正在检查更新…").unwrap();
+        check_update.set_text("正在檢查 APP 更新…").unwrap();
         check_update.set_enabled(false).unwrap();
     } else if state.update_flow_in_progress.load(Ordering::SeqCst) {
         return;
@@ -2300,7 +2300,7 @@ async fn offer_update(
         append_log(state, &format!("Update {version} deferred by user"));
         update_snapshot(app, state, |snapshot| {
             snapshot.update_message =
-                format!("已暂缓安装 {version}，可稍后从检查更新继续。");
+                format!("已暂缓安装 {version}，可稍後從「更新 APP」繼續。");
             snapshot.update_available = true;
         });
         finish_update_flow(state, check_update, quit);
@@ -2464,7 +2464,7 @@ fn main() {
                 None::<&str>,
             )?;
             let check_update =
-                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
+                MenuItem::with_id(app, "check-update", "更新 APP", true, None::<&str>)?;
             let restart_codex =
                 MenuItem::with_id(app, "restart-codex", "重新打开 Codex", true, None::<&str>)?;
             let autostart_enabled = app.autolaunch().is_enabled()?;
