@@ -838,6 +838,7 @@ export interface DeviceAutomation {
   lastStatus: {
     isRunning?: boolean;
     currentTaskId?: string | null;
+    models?: import("./types").AiChatModel[];
   } | null;
   enabledByUser: boolean;
   quotaAware: boolean;

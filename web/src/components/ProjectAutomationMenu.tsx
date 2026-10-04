@@ -159,7 +159,8 @@ export function ProjectAutomationMenu({
             : status === "ACTIVE"
               ? text("运行中", "Running")
               : text("已暂停", "Paused")));
-  const selectedModel = models.find((model) => model.slug === draft.model) ?? models[0];
+  const availableModels = currentDevice ? currentDevice.lastStatus?.models ?? [] : models;
+  const selectedModel = availableModels.find((model) => model.slug === draft.model) ?? availableModels[0];
   const disabled = pending || (deviceMode && !currentDevice) || (!currentDevice && (!selectedModel || Boolean(unavailableReason)));
 
   useEffect(() => {
@@ -344,7 +345,7 @@ export function ProjectAutomationMenu({
         <p className="project-automation-note">{text("额度会在执行设备上检查。", "Quota is checked on the execution device.")}</p>
       )}
       {currentDevice && !selectedModel && (
-        <p className="project-automation-note">{text("模型", "Model")} · {draft.model || text("使用设备预设", "Device default")}</p>
+        <p className="project-automation-note">{text("模型", "Model")} · {draft.model || text("等待设备回报可用模型", "Waiting for the device model catalog")}</p>
       )}
       {!currentDevice && draft.quotaAware && (
         <div className={`project-automation-quota is-${quota?.state ?? "unknown"}`}>
@@ -397,8 +398,8 @@ export function ProjectAutomationMenu({
           <div className="project-automation-field">
             <span>{text("模型", "Model")}</span>
             <TaskPropertyPicker
-              value={draft.model}
-              options={models.map((model) => ({
+              value={draft.model || selectedModel.slug}
+              options={availableModels.map((model) => ({
                 value: model.slug,
                 label: model.displayName,
                 icon: <ProjectIcon color="currentColor" size={14} />,
@@ -410,7 +411,7 @@ export function ProjectAutomationMenu({
               ariaLabel={text("模型", "Model")}
               onOpenChange={(open) => setPickerMenu(open ? "model" : null)}
               onChange={(value) => {
-                const model = models.find((candidate) => candidate.slug === value);
+                const model = availableModels.find((candidate) => candidate.slug === value);
                 if (!model) return;
                 submitChange({
                   ...draft,
@@ -425,7 +426,7 @@ export function ProjectAutomationMenu({
           <div className="project-automation-field">
             <span>{text("推理强度", "Reasoning effort")}</span>
             <TaskPropertyPicker
-              value={draft.reasoningEffort}
+              value={draft.reasoningEffort || selectedModel.defaultReasoningEffort}
               options={selectedModel.supportedReasoningEfforts.map((effort) => ({
                 value: effort,
                 label: EFFORT_LABELS[effort] ? text(...EFFORT_LABELS[effort]) : effort,

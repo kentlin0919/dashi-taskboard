@@ -7,6 +7,7 @@ export async function runDeviceAgent({
   credentials,
   fetch: fetchFn = globalThis.fetch,
   applyAutomation,
+  models,
   intervalSeconds = 30,
   once = false,
   stderr = process.stderr,
@@ -34,7 +35,7 @@ export async function runDeviceAgent({
     inFlight = true;
     try {
       const response = await fetchFn(`${credentials.siteUrl}/api/devices/${encodeURIComponent(credentials.deviceId)}/heartbeat`, {
-        method: "POST", headers, body: JSON.stringify({ isRunning: false, currentTaskId: null }),
+        method: "POST", headers, body: JSON.stringify({ status: { isRunning: false, currentTaskId: null, ...(models ? { models } : {}) } }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.error?.message ?? `Device heartbeat returned HTTP ${response.status}`);

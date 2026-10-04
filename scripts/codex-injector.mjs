@@ -2262,8 +2262,15 @@ async function synchronizeDevicePolicies() {
     await ensureQuotaPoliciesLoaded();
     const credentials = JSON.parse(await readFile(path.join(taskboardDataDirectory, "device-credentials.json"), "utf8"));
     let companionConfigured = false;
+    let deviceModels;
+    try {
+      const catalog = await requestCodexAppServerViaCdp(currentQuotaPolicyCdp(), undefined, "local", "model/list", { limit: 100 });
+      deviceModels = sanitizeAppServerModels(catalog.data);
+    } catch (error) {
+      console.error(`Device model catalog unavailable: ${error.message}`);
+    }
     const result = await runDeviceAgent({
-      credentials, once: true,
+      credentials, once: true, models: deviceModels,
       applyAutomation: async (automation) => {
         const projectId = automation.projectId;
         if (!companionConfigured) {
