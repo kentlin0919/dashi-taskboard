@@ -3036,7 +3036,10 @@ async function importSiteMigration(request, env) {
     let body;
     try {
       const binary = atob(attachment.bodyBase64);
-      body = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      body = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        body[index] = binary.charCodeAt(index);
+      }
     } catch {
       throw new ApiError(400, "INVALID_MIGRATION_ATTACHMENT", "Migration attachment data is invalid");
     }
