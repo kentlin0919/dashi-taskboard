@@ -144,7 +144,7 @@ export function DeviceManagementDialog({
 
         {loadError && <p role="alert" style={{ color: "var(--danger)", marginTop: 12 }}>{loadError}</p>}
         {deviceSession && siteUrl && <p style={{ marginTop: 12 }}>
-          {text("目前以此裝置身分連線，只顯示這台電腦。配對核准與排程設定請在雲端網站登入後操作。", "Connected as this device. Sign in to the cloud site to manage pairing and schedules.")}
+          {text("目前以此裝置身分連線，只顯示這台電腦。配對核准與其他裝置管理請在雲端網站登入後操作。", "Connected as this device. Sign in to the cloud site to manage pairing and other devices.")}
           {" "}<a href={siteUrl} target="_blank" rel="noreferrer">{text("開啟雲端管理", "Open cloud management")}</a>
         </p>}
         {actionError && (

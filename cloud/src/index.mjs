@@ -2812,7 +2812,7 @@ async function listProjectDeviceAutomations(projectId, env, deviceId = null) {
       deviceId: row.deviceId,
       deviceName: row.deviceName,
       scheduleState: lastStatus?.automations?.[projectId] ?? null,
-      canManage: !deviceId,
+      canManage: true,
       deviceStatus: row.deviceStatus,
       lastHeartbeatAt: row.lastHeartbeatAt,
       lastStatus,
@@ -3159,6 +3159,11 @@ async function routeApi(request, env, actor, url) {
     const selfAutomations = pathname.match(/^\/api\/projects\/([^/]+)\/devices\/automations$/);
     if (selfAutomations && request.method === "GET") {
       return listProjectDeviceAutomations(decodeURIComponent(selfAutomations[1]), env, actor.deviceId);
+    }
+    const selfAutomationWrite = pathname.match(/^\/api\/projects\/([^/]+)\/devices\/([^/]+)\/automation$/);
+    if (selfAutomationWrite && request.method === "PUT"
+      && decodeURIComponent(selfAutomationWrite[2]) === actor.deviceId) {
+      return saveProjectDeviceAutomation(decodeURIComponent(selfAutomationWrite[1]), actor.deviceId, request, env);
     }
     if (pathname.includes("/devices/automations") || pathname.includes("/automation")) {
       throw new ApiError(403, "FORBIDDEN", "Device cannot manage automations");
