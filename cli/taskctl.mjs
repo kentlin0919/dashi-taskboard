@@ -31,10 +31,12 @@ const sourceRuntimeFile = path.resolve(
   ".data",
   "launcher-runtime.json",
 );
-const deviceCredentialsFile = path.resolve(
-  process.env.CODEX_TASKBOARD_DATA_DIR || path.dirname(sourceRuntimeFile),
-  "device-credentials.json",
-);
+function deviceCredentialsPath(env = process.env) {
+  return path.resolve(
+    env.CODEX_TASKBOARD_DATA_DIR || path.dirname(env.CODEX_TASKBOARD_RUNTIME_FILE || sourceRuntimeFile),
+    "device-credentials.json",
+  );
+}
 const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help", "once"]);
 const GLOBAL_OPTIONS = new Set(["runtime-file"]);
 
@@ -416,23 +418,23 @@ async function execute(parsed, overrides) {
     case "device pair":
       expectOperandCount(parsed, 0);
       return devicePair(
-        overrides,
+        api, { ...overrides, env },
         requiredOption(parsed.options, "url"),
         parsed.options.name,
       );
     case "device status":
       expectOperandCount(parsed, 0);
-      return deviceStatus(overrides);
+      return deviceStatus({ ...overrides, env });
     case "device revoke":
       expectOperandCount(parsed, 0);
-      return deviceRevoke(overrides);
+      return deviceRevoke({ ...overrides, env });
     case "device agent": {
       expectOperandCount(parsed, 0);
       const intervalSeconds = parsed.options.interval === undefined ? 30 : Number(parsed.options.interval);
       if (!Number.isFinite(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 2_147_483) {
         throw usageError("Device agent interval must be between 1 and 2147483 seconds");
       }
-      return deviceAgent(overrides, {
+      return deviceAgent({ ...overrides, env }, {
         intervalSeconds,
         once: Boolean(parsed.options.once),
       });
@@ -880,9 +882,9 @@ async function readSecretFromInput(input, output) {
   });
 }
 
-async function loadDeviceCredentials() {
+async function loadDeviceCredentials(env) {
   try {
-    const raw = await readFile(deviceCredentialsFile, "utf8");
+    const raw = await readFile(deviceCredentialsPath(env), "utf8");
     return JSON.parse(raw);
   } catch (error) {
     if (error?.code === "ENOENT") return null;
@@ -890,7 +892,8 @@ async function loadDeviceCredentials() {
   }
 }
 
-async function saveDeviceCredentials(credentials) {
+async function saveDeviceCredentials(credentials, env) {
+  const deviceCredentialsFile = deviceCredentialsPath(env);
   const dir = path.dirname(deviceCredentialsFile);
   await mkdir(dir, { recursive: true });
   await writeFile(deviceCredentialsFile, `${JSON.stringify(credentials, null, 2)}\n`, {
@@ -910,7 +913,7 @@ function deviceRequestHeaders(credentials, { contentType = false } = {}) {
   };
 }
 
-async function devicePair(overrides, rawUrl, rawName) {
+async function devicePair(api, overrides, rawUrl, rawName) {
   let siteUrl;
   try {
     siteUrl = normalizeCloudUrl(rawUrl);
@@ -1053,7 +1056,12 @@ async function devicePair(overrides, rawUrl, rawName) {
       deviceName: claimData.deviceName || deviceName,
       pairedAt: new Date().toISOString(),
     };
-    await saveDeviceCredentials(credentials);
+    await saveDeviceCredentials(credentials, overrides.env);
+    await api.request("PUT", "/api/local/cloud-session", {
+      remoteUrl: siteUrl, actorName: credentials.deviceName,
+      deviceToken: credentials.deviceToken, deviceId: credentials.deviceId,
+      siteAuthorizationToken: credentials.siteAuthorizationToken ?? null,
+    });
     output.write(`裝置配對成功，裝置 ID 為 ${credentials.deviceId}\n`);
     return {
       success: true,
@@ -1067,7 +1075,7 @@ async function devicePair(overrides, rawUrl, rawName) {
 }
 
 async function deviceStatus(overrides) {
-  const creds = await loadDeviceCredentials();
+  const creds = await loadDeviceCredentials(overrides.env);
   if (!creds) {
     return { paired: false, message: "此裝置尚未配對" };
   }
@@ -1100,7 +1108,7 @@ async function deviceStatus(overrides) {
 }
 
 async function deviceRevoke(overrides) {
-  const creds = await loadDeviceCredentials();
+  const creds = await loadDeviceCredentials(overrides.env);
   if (!creds) {
     return { success: true, message: "本機未存有裝置憑證" };
   }
@@ -1116,12 +1124,12 @@ async function deviceRevoke(overrides) {
       { code: payload?.error?.code ?? "DEVICE_REVOKE_FAILED", exitCode: 3 },
     );
   }
-  await rm(deviceCredentialsFile, { force: true });
+  await rm(deviceCredentialsPath(overrides.env), { force: true });
   return { success: true, message: "裝置已撤銷並清除本機憑證" };
 }
 
 async function deviceAgent(overrides, { intervalSeconds = 30, once = false } = {}) {
-  const creds = await loadDeviceCredentials();
+  const creds = await loadDeviceCredentials(overrides.env);
   if (!creds) {
     throw new TaskctlError("裝置尚未配對，請先執行 taskctl device pair", {
       code: "NOT_PAIRED",

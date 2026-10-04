@@ -222,3 +222,5 @@ Thanks to [Lingshan21](https://github.com/Lingshan21) for:
 Pair each device, open Codex Taskboard App, and set that device's absolute project folder in the project automation menu. Add the same folder as a project in Codex App. The launcher synchronizes cloud settings every 30 seconds and creates native Codex App schedules. Auto-claim uses the existing comment/dependency checks, quota policy and complete conversation binding; the device controller never marks a card complete from a process exit. Keep the App running. Standalone `taskctl device agent` no longer launches independent Codex CLI sessions.
 
 Sites initial migration accepts at most 40 MiB of JSON including Base64 attachments. This supports an individual attachment up to 25 MiB; the whole bundle still has the stated limit. Larger combined bundles must be reduced before this one-time import.
+
+装置配对会把本机 companion 切换到该装置配对的云端，任务读取、写入和实时连接使用装置 Bearer 凭证，不需要把拥有者的共享密钥复制到其他电脑。原生排程执行前还会核对云端来源，来源不符时停止，不回退本机资料。

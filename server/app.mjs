@@ -1960,6 +1960,7 @@ export function createTaskboardServer(options = {}) {
               mode: "cloud",
               remoteUrl: config.remoteUrl,
               actorName: config.actorName,
+              ...(config.deviceId ? { deviceId: config.deviceId } : {}),
               authenticated: true,
             }
             : { mode: "local", authenticated: false });
@@ -1967,18 +1968,21 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "PUT") {
           const body = await readJson(request);
           assertPlainObject(body);
-          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey", "siteAuthorizationToken"]));
+          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey", "deviceToken", "deviceId", "siteAuthorizationToken"]));
           try {
             const config = await cloudConfig.configure({
               remoteUrl: body.remoteUrl,
               actorName: body.actorName,
               sharedKey: body.sharedKey,
+              deviceToken: body.deviceToken,
+              deviceId: body.deviceId,
               siteAuthorizationToken: body.siteAuthorizationToken,
             });
             return sendJson(response, 200, {
               mode: "cloud",
               remoteUrl: config.remoteUrl,
               actorName: config.actorName,
+              ...(config.deviceId ? { deviceId: config.deviceId } : {}),
               authenticated: true,
             });
           } catch (error) {

@@ -1786,6 +1786,16 @@ function remoteAutomationItem(request, status, nextRunAt) {
   };
 }
 
+async function assertCloudAutomationSource(request) {
+  if (!request.cloudUrl) return;
+  const session = await taskboardRequest("/api/local/cloud-session");
+  if (session.mode !== "cloud" || session.authenticated !== true
+    || typeof session.remoteUrl !== "string"
+    || session.remoteUrl.replace(/\/+$/, "") !== request.cloudUrl.replace(/\/+$/, "")) {
+    throw new Error("本機 companion 尚未登入配對的雲端任務面板，已停止此裝置的自動認領");
+  }
+}
+
 async function localAutomationTodoInputs(request, tasks) {
   // Local cron can also continue complete or legacy bindings. Do not use the
   // remote worker's eligibility filter here, or inspect in_progress workers.
@@ -1822,6 +1832,7 @@ async function localAutomationTodoGate(request, tasks, previousGate, evaluatedTo
 
 async function evaluateLocalAutomationTodos(record) {
   const { request, version, todoGate } = record;
+  await assertCloudAutomationSource(request);
   const stillCurrent = () => quotaPolicyRecords.get(request.taskboardProjectId)?.version === version;
   const listed = await taskboardRequest(
     `/api/tasks?projectId=${encodeURIComponent(request.taskboardProjectId)}&status=todo`,
@@ -1848,6 +1859,7 @@ async function applyTaskboardAutomationPolicy(
     previousTodoGate, evaluatedTodoGate,
   } = {},
 ) {
+  if (request.enabledByUser) await assertCloudAutomationSource(request);
   const todoResponse = request.enabledByUser
     ? await fetch(
       `${taskboardBaseUrl}/api/tasks?projectId=${encodeURIComponent(request.taskboardProjectId)}&status=todo`,
@@ -1946,6 +1958,7 @@ function storedAutomationPolicy(request) {
     codexProjectId: request.codexProjectId,
     codexProjectKind: request.codexProjectKind,
     codexHostId: request.codexHostId,
+    ...(request.cloudUrl ? { cloudUrl: request.cloudUrl } : {}),
     projectName: request.projectName,
     workspacePath: request.workspacePath,
     remoteProjects: request.remoteProjects ?? [],
@@ -2242,11 +2255,20 @@ async function synchronizeDevicePolicies() {
   try {
     await ensureQuotaPoliciesLoaded();
     const credentials = JSON.parse(await readFile(path.join(taskboardDataDirectory, "device-credentials.json"), "utf8"));
+    let companionConfigured = false;
     const result = await runDeviceAgent({
       credentials, once: true,
       applyAutomation: async (automation) => {
         const projectId = automation.projectId;
-        const snapshot = JSON.stringify(automation);
+        if (!companionConfigured) {
+          await taskboardRequest("/api/local/cloud-session", { method: "PUT", body: {
+            remoteUrl: credentials.siteUrl, actorName: credentials.deviceName || credentials.deviceId,
+            deviceToken: credentials.deviceToken, deviceId: credentials.deviceId,
+            siteAuthorizationToken: credentials.siteAuthorizationToken ?? null,
+          } });
+          companionConfigured = true;
+        }
+        const snapshot = JSON.stringify([credentials.siteUrl, credentials.deviceId, automation]);
         if (devicePolicySnapshots.get(projectId) === snapshot
           && quotaPolicyRecords.get(projectId)?.request.enabledByUser === automation.enabledByUser) return;
         if (!automation.enabledByUser) {
@@ -2269,14 +2291,14 @@ async function synchronizeDevicePolicies() {
         const models = sanitizeAppServerModels(catalog.data);
         const selectedModel = automation.model
           ? models.find((model) => model.slug === automation.model)
-          : models.find((model) => model.isDefault) ?? models[0];
+          : models.find((model) => model.slug === catalog.data.find((raw) => raw.isDefault === true)?.model) ?? models[0];
         if (!selectedModel) throw new Error("無法確認此裝置可使用的 Codex 模型");
         const reasoningEffort = automation.reasoningEffort || selectedModel.defaultReasoningEffort;
         if (!selectedModel.supportedReasoningEfforts.includes(reasoningEffort)) {
           throw new Error("此裝置不支援排程選定的推理強度");
         }
         const request = {
-          taskboardProjectId: projectId, codexProjectId,
+          taskboardProjectId: projectId, codexProjectId, cloudUrl: credentials.siteUrl,
           codexProjectKind: "local", codexHostId: "local",
           projectName: project.name || projectId,
           workspacePath: automation.workspacePath,

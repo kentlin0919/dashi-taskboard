@@ -39,23 +39,28 @@ export async function runDeviceAgent({
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.error?.message ?? `Device heartbeat returned HTTP ${response.status}`);
       if (!Array.isArray(payload.automations)) throw new Error("Device heartbeat returned invalid automations");
+      const failures = [];
       for (const automation of payload.automations) {
         if (!automation || typeof automation.projectId !== "string") throw new Error("Invalid device project automation");
-        const workspacePath = automation.workspacePath;
-        if (automation.enabledByUser) {
-          try {
+        try {
+          if (automation.enabledByUser) {
+            const workspacePath = automation.workspacePath;
             if (!path.isAbsolute(workspacePath ?? "") || !(await stat(workspacePath)).isDirectory()) {
               throw new Error("請先設定此裝置的有效專案目錄");
             }
-          } catch (error) {
-            await applyAutomation({ ...automation, enabledByUser: false });
-            stderr.write(`專案 ${automation.projectId} 未啟用：${error.message}\n`);
-            continue;
           }
+          await applyAutomation(automation);
+        } catch (error) {
+          await applyAutomation({ ...automation, enabledByUser: false });
+          failures.push(automation.projectId);
+          stderr.write(`專案 ${automation.projectId} 未啟用，${error.message}\n`);
         }
-        await applyAutomation(automation);
       }
-      return { success: true, status: "native_policies_synchronized", projectIds: payload.automations.map((item) => item.projectId) };
+      return {
+        success: failures.length === 0,
+        status: failures.length ? "native_policies_partially_synchronized" : "native_policies_synchronized",
+        projectIds: payload.automations.map((item) => item.projectId), failures,
+      };
     } finally {
       inFlight = false;
     }

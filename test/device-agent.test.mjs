@@ -9,104 +9,60 @@ function response(status, payload = {}) {
   });
 }
 
-function makeHarness({ claimStatus = 200 } = {}) {
+function makeHarness(automations) {
   const calls = [];
-  let task = {
-    id: "task-1",
-    identifier: "TB-1",
-    projectId: "project-1",
-    title: "Repair the connection",
-    description: "Reconnect after the Site tab resumes.",
-    status: "todo",
-    version: 1,
-    archivedAt: null,
-    threadBinding: null,
-  };
   const fetch = async (input, init = {}) => {
     const url = new URL(input);
-    const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : null;
-    calls.push({ url, method, headers: new Headers(init.headers), body });
-    if (url.pathname.endsWith("/heartbeat")) {
-      return response(200, {
-        automations: [{
-          projectId: "project-1",
-          enabledByUser: true,
-          intervalMinutes: 5,
-          workspacePath: process.cwd(),
-        }],
-      });
-    }
-    if (url.pathname === "/api/tasks") return response(200, { tasks: [task] });
-    if (url.pathname === "/api/tasks/task-1" && method === "GET") {
-      return response(200, { task });
-    }
-    if (url.pathname === "/api/tasks/task-1/move") {
-      if (claimStatus !== 200) return response(claimStatus, { error: { message: "version conflict" } });
-      task = { ...task, status: body.status, version: body.version + 1 };
-      return response(200, { task });
-    }
-    if (url.pathname === "/api/tasks/task-1/comments") {
-      if (method === "POST") return response(201, { comment: {} });
-      return response(200, { comments: [] });
-    }
-    if (url.pathname === "/api/tasks/task-1/attachments") {
-      return response(200, { attachments: [] });
-    }
-    if (url.pathname === "/api/projects") {
-      return response(200, { projects: [{ id: "project-1", name: "Taskboard" }] });
-    }
-    throw new Error(`Unexpected request: ${method} ${url.pathname}`);
+    calls.push({ url, headers: new Headers(init.headers), body });
+    if (url.pathname.endsWith("/heartbeat")) return response(200, { automations });
+    throw new Error(`Unexpected card mutation or request: ${url.pathname}`);
   };
-  return { calls, fetch, get task() { return task; } };
+  return { calls, fetch };
 }
 
-test("device agent claims with version guard before starting Codex and completes into review", async () => {
-  const harness = makeHarness();
-  const started = [];
-  await runDeviceAgent({
-    credentials: {
-      siteUrl: "https://taskboard.example.test",
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      siteAuthorizationToken: "site-token",
-    },
-    fetch: harness.fetch,
-    once: true,
-    stderr: { write() {} },
-    runCodex: async (input) => {
-      started.push(input.task.identifier);
-      return { success: true, summary: "Updated the reconnect path." };
-    },
-  });
+const credentials = {
+  siteUrl: "https://taskboard.example.test",
+  deviceId: "device-1",
+  deviceToken: "device-token",
+  siteAuthorizationToken: "site-token",
+};
 
-  assert.deepEqual(started, ["TB-1"]);
-  assert.equal(harness.task.status, "in_review");
-  const claim = harness.calls.find((call) => call.url.pathname.endsWith("/move"));
-  assert.deepEqual(claim.body, { status: "in_progress", version: 1 });
-  assert.equal(claim.headers.get("authorization"), "Bearer device-token");
-  assert.equal(claim.headers.get("oai-sites-authorization"), "Bearer site-token");
+const automation = {
+  projectId: "project-1", enabledByUser: true, quotaAware: true,
+  intervalMinutes: 5, workspacePath: process.cwd(),
+};
+
+test("device controller synchronizes native policies without claiming cards or inferring completion", async () => {
+  const harness = makeHarness([automation]);
+  const policies = [];
+  const result = await runDeviceAgent({
+    credentials, fetch: harness.fetch, once: true, stderr: { write() {} },
+    applyAutomation: async (input) => { policies.push(input); },
+  });
+  assert.equal(result.success, true);
+  assert.deepEqual(policies, [automation]);
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].headers.get("authorization"), "Bearer device-token");
+  assert.equal(harness.calls[0].headers.get("oai-sites-authorization"), "Bearer site-token");
+  assert.equal(harness.calls[0].body.isRunning, false);
 });
 
-test("device agent does not start Codex when another client wins the version-guarded claim", async () => {
-  const harness = makeHarness({ claimStatus: 409 });
-  let started = false;
-  await runDeviceAgent({
-    credentials: {
-      siteUrl: "https://taskboard.example.test",
-      deviceId: "device-1",
-      deviceToken: "device-token",
+test("one invalid native policy does not pause a different project's valid schedule", async () => {
+  const second = { ...automation, projectId: "project-2" };
+  const harness = makeHarness([automation, second]);
+  const policies = [];
+  const result = await runDeviceAgent({
+    credentials, fetch: harness.fetch, once: true, stderr: { write() {} },
+    applyAutomation: async (input) => {
+      policies.push(input);
+      if (input.projectId === "project-1" && input.enabledByUser) throw new Error("Project is not mapped in Codex");
     },
-    fetch: harness.fetch,
-    once: true,
-    stderr: { write() {} },
-    runCodex: async () => { started = true; return { success: true }; },
   });
-
-  assert.equal(started, false);
-  assert.equal(harness.task.status, "todo");
-  const runningHeartbeat = harness.calls.some((call) => (
-    call.url.pathname.endsWith("/heartbeat") && call.body?.isRunning === true
-  ));
-  assert.equal(runningHeartbeat, false);
+  assert.equal(result.success, false);
+  assert.deepEqual(result.failures, ["project-1"]);
+  assert.deepEqual(policies.map((item) => [item.projectId, item.enabledByUser]), [
+    ["project-1", true], ["project-1", false], ["project-2", true],
+  ]);
+  assert.equal(harness.calls.length, 1);
 });

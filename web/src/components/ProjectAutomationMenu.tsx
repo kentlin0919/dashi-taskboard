@@ -340,7 +340,13 @@ export function ProjectAutomationMenu({
           <span aria-hidden="true" />
         </button>
       </div>
-      {draft.quotaAware && (
+      {currentDevice && draft.quotaAware && (
+        <p className="project-automation-note">{text("额度会在执行设备上检查。", "Quota is checked on the execution device.")}</p>
+      )}
+      {currentDevice && !selectedModel && (
+        <p className="project-automation-note">{text("模型", "Model")} · {draft.model || text("使用设备预设", "Device default")}</p>
+      )}
+      {!currentDevice && draft.quotaAware && (
         <div className={`project-automation-quota is-${quota?.state ?? "unknown"}`}>
           {quota?.state === "available" && text("当前额度可用", "Quota is available")}
           {quota?.state === "blocked" && (

@@ -26,8 +26,10 @@ export function isLocalCompanionRoute(pathname) {
     || /^\/api\/projects\/[^/]+\/development-contexts$/.test(pathname);
 }
 
-function basicAuthorization(actorName, sharedKey) {
-  return `Basic ${Buffer.from(`${actorName}:${sharedKey}`, "utf8").toString("base64")}`;
+function cloudAuthorization(config) {
+  return config.deviceToken
+    ? `Bearer ${config.deviceToken}`
+    : `Basic ${Buffer.from(`${config.actorName}:${config.sharedKey}`, "utf8").toString("base64")}`;
 }
 
 async function prepareRequest(request, {
@@ -207,7 +209,7 @@ export function createCloudProxy({
   return {
     async webSocketTarget(pathname = "/api/events") {
       const config = await readConfig();
-      if (!config?.remoteUrl || !config.actorName || !config.sharedKey) {
+      if (!config?.remoteUrl || !config.actorName || (!config.sharedKey && !config.deviceToken)) {
         throw new CloudProxyError(
           409,
           "CLOUD_NOT_CONFIGURED",
@@ -229,14 +231,14 @@ export function createCloudProxy({
       return {
         url: url.href,
         headers: {
-          authorization: basicAuthorization(config.actorName, config.sharedKey),
+          authorization: cloudAuthorization(config),
           ...(config.siteAuthorizationToken ? { "OAI-Sites-Authorization": `Bearer ${config.siteAuthorizationToken}` } : {}),
         },
       };
     },
     async forward(request) {
       const config = await readConfig();
-      if (!config?.remoteUrl || !config.actorName || !config.sharedKey) {
+      if (!config?.remoteUrl || !config.actorName || (!config.sharedKey && !config.deviceToken)) {
         throw new CloudProxyError(
           409,
           "CLOUD_NOT_CONFIGURED",
@@ -268,7 +270,7 @@ export function createCloudProxy({
       for (const name of [...headers.keys()]) {
         if (name.toLowerCase().startsWith("x-taskboard-user-")) headers.delete(name);
       }
-      headers.set("authorization", basicAuthorization(config.actorName, config.sharedKey));
+      headers.set("authorization", cloudAuthorization(config));
       headers.delete("OAI-Sites-Authorization");
       if (config.siteAuthorizationToken) headers.set("OAI-Sites-Authorization", `Bearer ${config.siteAuthorizationToken}`);
 

@@ -14,6 +14,7 @@ const HOST_REQUEST_FIELDS = new Set([
   "codexProjectId",
   "codexProjectKind",
   "codexHostId",
+  "cloudUrl",
   "projectName",
   "workspacePath",
   "remoteProjects",
@@ -38,6 +39,12 @@ export function parseTaskboardAutomationHostRequest(value) {
   const codexHostId = value.codexHostId ?? "local";
   if (codexProjectKind !== "local" && codexProjectKind !== "remote") return null;
   if (!validText(codexHostId, 256)) return null;
+  if (value.cloudUrl !== undefined) {
+    try {
+      const url = new URL(value.cloudUrl);
+      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return null;
+    } catch { return null; }
+  }
   if (codexProjectKind === "local" && codexHostId !== "local") return null;
   if (codexProjectKind === "remote" && codexHostId === "local") return null;
   if (!validAbsolutePath(value.workspacePath) || !validAbsolutePath(value.skillPath)) return null;
@@ -75,6 +82,7 @@ export function parseTaskboardAutomationHostRequest(value) {
     codexProjectId: value.codexProjectId,
     codexProjectKind,
     codexHostId,
+    ...(value.cloudUrl ? { cloudUrl: value.cloudUrl } : {}),
     projectName: value.projectName,
     workspacePath: value.workspacePath,
     ...(value.remoteProjects === undefined ? {} : { remoteProjects }),
@@ -126,7 +134,10 @@ export function buildTaskboardAutomationPrompt(request) {
   return [
     `[$manage-taskboard](${request.skillPath}) e-taskboard 每 ${request.intervalMinutes} 分钟检查任务面板中的「${request.projectName}」项目（项目 ID：${request.taskboardProjectId}，项目目录：${request.workspacePath}）。`,
     `本轮所有 taskctl 操作都使用完整命令前缀 ${taskctlCommand}，不要使用 PATH 中的 taskctl。`,
-    `开始时先运行 ${taskctlCommand} issue list --project ${request.taskboardProjectId} --status todo --json。若没有 todo，直接结束；Taskboard 主机侧会暂停当前自动化，不要创建或打开新的任务会话。`,
+    ...(request.cloudUrl ? [
+      `本排程只允许操作配对的云端 ${request.cloudUrl}。每次读取或写入任务前运行 ${taskctlCommand} cloud status --json，确认 mode=cloud、authenticated=true、remoteUrl 与此 URL 一致；不一致时立即停止，不得回退本机资料或操作其他云端。`,
+    ] : []),
+    `开始时先确认上文的云端来源限制（若有），再运行 ${taskctlCommand} issue list --project ${request.taskboardProjectId} --status todo --json。若没有 todo，直接结束；Taskboard 主机侧会暂停当前自动化，不要创建或打开新的任务会话。`,
     ...executionInstructions,
     "执行后写入状态前，重新读取主文、全部评论、附件及依赖，比较执行开始时的内容快照，排除本会话自己的进度留言。若有新要求、附件或评论编辑，先处理变化；无法继续时以完整原 binding 和最新 version 写入 blocked，说明待使用者确认。任务或完整五栏 binding 已转移到其他会话时立即停止写入。进程或回合结束本身不代表完成；只有完成当前授权范围并记录实际验证证据后才能写入 in_review。",
     `本次处理或交接后，再次运行 ${taskctlCommand} issue list --project ${request.taskboardProjectId} --status todo --json。若没有 todo，直接结束；Taskboard 主机侧会暂停当前自动化，避免后续创建空会话。`,
