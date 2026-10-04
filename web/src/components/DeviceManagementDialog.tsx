@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useTaskboardI18n } from "../i18n";
 import {
+  ApiError,
+  fetchDeviceCloudSession,
   fetchDevices,
   fetchPairingRequests,
   approvePairingRequest,
@@ -25,7 +27,10 @@ export function DeviceManagementDialog({
   const [loading, setLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [commandCopied, setCommandCopied] = useState(false);
-  const pairingCommand = `taskctl device pair --url ${JSON.stringify(window.location.origin)}`;
+  const [siteUrl, setSiteUrl] = useState("");
+  const [deviceSession, setDeviceSession] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const pairingCommand = siteUrl ? `taskctl device pair --url ${JSON.stringify(siteUrl)}` : "";
 
   async function copyPairingCommand() {
     setActionError(null);
@@ -39,14 +44,23 @@ export function DeviceManagementDialog({
 
   async function loadData() {
     try {
-      const [devList, reqList] = await Promise.all([
+      const [session, devList, reqList] = await Promise.all([
+        fetchDeviceCloudSession(),
         fetchDevices(),
-        fetchPairingRequests(),
+        fetchPairingRequests().catch((error) => {
+          if (error instanceof ApiError && error.status === 403) return null;
+          throw error;
+        }),
       ]);
+      const resolvedUrl = new URL(session.remoteUrl || document.baseURI);
+      if (!["http:", "https:"].includes(resolvedUrl.protocol)) throw new Error(text("無法取得雲端網站網址。", "Could not resolve the cloud site URL."));
+      setSiteUrl(resolvedUrl.origin);
+      setDeviceSession(Boolean(session.deviceId) || reqList === null);
       setDevices(devList);
-      setRequests(reqList);
+      setRequests(reqList ?? []);
+      setLoadError(null);
     } catch (err) {
-      // 忽略定時拉取錯誤
+      setLoadError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -128,6 +142,11 @@ export function DeviceManagementDialog({
           </button>
         </div>
 
+        {loadError && <p role="alert" style={{ color: "var(--danger)", marginTop: 12 }}>{loadError}</p>}
+        {deviceSession && siteUrl && <p style={{ marginTop: 12 }}>
+          {text("目前以此裝置身分連線，只顯示這台電腦。配對核准與排程設定請在雲端網站登入後操作。", "Connected as this device. Sign in to the cloud site to manage pairing and schedules.")}
+          {" "}<a href={siteUrl} target="_blank" rel="noreferrer">{text("開啟雲端管理", "Open cloud management")}</a>
+        </p>}
         {actionError && (
           <div className="callout callout-error" style={{ marginTop: 12 }}>
             {actionError}
@@ -149,12 +168,12 @@ export function DeviceManagementDialog({
             onFocus={(event) => event.currentTarget.select()}
             style={{ width: "100%", boxSizing: "border-box", resize: "none", fontFamily: "monospace", fontSize: 13, padding: 10, borderRadius: 6, background: "var(--surface)", color: "var(--text-primary)", border: "1px solid var(--border-strong)" }}
           />
-          <button type="button" className="button primary" onClick={copyPairingCommand} style={{ marginTop: 8 }}>
+          <button type="button" className="button primary" disabled={!pairingCommand} onClick={copyPairingCommand} style={{ marginTop: 8 }}>
             {commandCopied ? text("已複製", "Copied") : text("複製配對指令", "Copy pairing command")}
           </button>
         </div>
 
-        <div style={{ display: "block", marginTop: 16 }}>
+        {!deviceSession && <div style={{ display: "block", marginTop: 16 }}>
           <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
             {text("待確認的配對請求", "Pending Pairing Requests")}
           </h3>
@@ -207,13 +226,13 @@ export function DeviceManagementDialog({
               ))}
             </div>
           )}
-        </div>
+        </div>}
 
         <div style={{ display: "block", marginTop: 24 }}>
           <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
             {text("已配對裝置", "Paired Devices")}
           </h3>
-          {devices.length === 0 ? (
+          {loading ? <p>{text("正在讀取裝置…", "Loading devices…")}</p> : loadError ? null : devices.length === 0 ? (
             <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
               {text("尚未配對任何裝置。", "No paired devices.")}
             </div>

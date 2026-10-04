@@ -847,6 +847,15 @@ export interface DeviceAutomation {
   workspacePath: string | null;
 }
 
+export async function fetchDeviceCloudSession(): Promise<{ remoteUrl?: string; deviceId?: string }> {
+  try {
+    return await request("/api/local/cloud-session");
+  } catch (error) {
+    if (error instanceof ApiError && (error.code === "LOCAL_COMPANION_REQUIRED" || error.code === "LOCAL_ONLY" || error.status === 404)) return {};
+    throw error;
+  }
+}
+
 export async function fetchDevices(): Promise<Device[]> {
   const data = await request<{ devices: Device[] }>("/api/devices");
   return data.devices ?? [];

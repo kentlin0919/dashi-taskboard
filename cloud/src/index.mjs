@@ -2706,11 +2706,11 @@ async function rejectDevicePairing(request, env) {
   return json(200, { ok: true, success: true });
 }
 
-async function listDevices(env) {
+async function listDevices(env, deviceId = null) {
   const result = await env.DB.prepare(`
     SELECT id, name, status, last_heartbeat_at AS lastHeartbeatAt, last_status AS lastStatus, created_at AS createdAt, updated_at AS updatedAt
-    FROM devices ORDER BY created_at DESC
-  `).all();
+    FROM devices WHERE (? IS NULL OR id = ?) ORDER BY created_at DESC
+  `).bind(deviceId, deviceId).all();
   const devices = result.results.map((row) => {
     let statusObj = null;
     if (row.lastStatus) {
@@ -3143,7 +3143,8 @@ async function routeApi(request, env, actor, url) {
       throw new ApiError(403, "FORBIDDEN", "Device cannot manage pairing requests");
     }
     if (pathname === "/api/devices") {
-      throw new ApiError(403, "FORBIDDEN", "Device cannot list devices");
+      if (request.method !== "GET") methodNotAllowed(["GET"]);
+      return listDevices(env, actor.deviceId);
     }
     const selfRevokePath = `/api/devices/${encodeURIComponent(actor.deviceId)}/revoke`;
     if (
