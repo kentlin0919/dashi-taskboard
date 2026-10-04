@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 
 import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { parseAgentSession } from "../shared/task-input.mjs";
+import { runDeviceAgent } from "./device-agent.mjs";
 import { normalizeCloudUrl } from "../server/cloud-config.mjs";
 import {
   DEFAULT_PROJECT_ID,
@@ -27,7 +31,13 @@ const sourceRuntimeFile = path.resolve(
   ".data",
   "launcher-runtime.json",
 );
-const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help"]);
+function deviceCredentialsPath(env = process.env) {
+  return path.resolve(
+    env.CODEX_TASKBOARD_DATA_DIR || path.dirname(env.CODEX_TASKBOARD_RUNTIME_FILE || sourceRuntimeFile),
+    "device-credentials.json",
+  );
+}
+const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help", "once"]);
 const GLOBAL_OPTIONS = new Set(["runtime-file"]);
 
 const COMMAND_OPTIONS = new Map([
@@ -38,6 +48,10 @@ const COMMAND_OPTIONS = new Map([
   ["cloud login", new Set(["url", "actor-name", "json"])],
   ["cloud status", new Set(["json"])],
   ["cloud logout", new Set(["json"])],
+  ["device pair", new Set(["url", "name", "json"])],
+  ["device status", new Set(["json"])],
+  ["device revoke", new Set(["json"])],
+  ["device agent", new Set(["interval", "once", "json"])],
   ["issue list", new Set(["project", "status", "archived", "json"])],
   ["issue get", new Set(["json"])],
   [
@@ -132,6 +146,9 @@ Commands:
   project readme set [PROJECT_ID] (--content TEXT | --file FILE) [--if-version N]
   cloud login --url URL --actor-name NAME
   cloud status|logout
+  device pair --url URL [--name NAME]
+  device status|revoke
+  device agent [--interval SECONDS] [--once]
   issue list|get|create|update|move|archive|restore|tree|relation
   comment list ISSUE_ID [--after CURSOR]
   comment add ISSUE_ID (--body TEXT | --body-file FILE) [--thread-id ID]
@@ -340,7 +357,7 @@ async function execute(parsed, overrides) {
   const allowedOptions = COMMAND_OPTIONS.get(command);
   if (!allowedOptions) {
     throw usageError(
-      "Expected one of: project list/create/map/readme, cloud login/status/logout, issue list/get/create/update/move/archive/restore/tree/relation, comment list/add/update/delete, attachment list/download/upload, context current",
+      "Expected one of: project list/create/map/readme, cloud login/status/logout, device pair/status/revoke/agent, issue list/get/create/update/move/archive/restore/tree/relation, comment list/add/update/delete, attachment list/download/upload, context current",
     );
   }
   validateOptions(parsed.options, allowedOptions);
@@ -398,6 +415,30 @@ async function execute(parsed, overrides) {
     case "cloud logout":
       expectOperandCount(parsed, 0);
       return api.request("DELETE", "/api/local/cloud-session");
+    case "device pair":
+      expectOperandCount(parsed, 0);
+      return devicePair(
+        api, { ...overrides, env },
+        requiredOption(parsed.options, "url"),
+        parsed.options.name,
+      );
+    case "device status":
+      expectOperandCount(parsed, 0);
+      return deviceStatus({ ...overrides, env });
+    case "device revoke":
+      expectOperandCount(parsed, 0);
+      return deviceRevoke({ ...overrides, env });
+    case "device agent": {
+      expectOperandCount(parsed, 0);
+      const intervalSeconds = parsed.options.interval === undefined ? 30 : Number(parsed.options.interval);
+      if (!Number.isFinite(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 2_147_483) {
+        throw usageError("Device agent interval must be between 1 and 2147483 seconds");
+      }
+      return deviceAgent({ ...overrides, env }, {
+        intervalSeconds,
+        once: Boolean(parsed.options.once),
+      });
+    }
     case "issue list":
       expectOperandCount(parsed, 0);
       return listIssues(api, parsed.options);
@@ -838,6 +879,270 @@ async function readSecretFromInput(input, output) {
     input.setEncoding("utf8");
     input.resume();
     input.on("data", onData);
+  });
+}
+
+async function loadDeviceCredentials(env) {
+  try {
+    const raw = await readFile(deviceCredentialsPath(env), "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function saveDeviceCredentials(credentials, env) {
+  const deviceCredentialsFile = deviceCredentialsPath(env);
+  const dir = path.dirname(deviceCredentialsFile);
+  await mkdir(dir, { recursive: true });
+  await writeFile(deviceCredentialsFile, `${JSON.stringify(credentials, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  await chmod(deviceCredentialsFile, 0o600);
+}
+
+function deviceRequestHeaders(credentials, { contentType = false } = {}) {
+  return {
+    Accept: "application/json",
+    Authorization: `Bearer ${credentials.deviceToken}`,
+    ...(credentials.siteAuthorizationToken
+      ? { "OAI-Sites-Authorization": `Bearer ${credentials.siteAuthorizationToken}` }
+      : {}),
+    ...(contentType ? { "Content-Type": "application/json" } : {}),
+  };
+}
+
+async function devicePair(api, overrides, rawUrl, rawName) {
+  let siteUrl;
+  try {
+    siteUrl = normalizeCloudUrl(rawUrl);
+  } catch (error) {
+    throw new TaskctlError(error instanceof Error ? error.message : String(error), {
+      code: error?.code ?? "INVALID_CLOUD_URL",
+      exitCode: 2,
+    });
+  }
+  const deviceName = rawName || os.hostname() || "My Computer";
+  const output = overrides.stderr ?? process.stderr;
+  const state = randomBytes(32).toString("hex");
+  const siteOrigin = new URL(siteUrl).origin;
+  let resolveCredentials;
+  let rejectCredentials;
+  const credentialsPromise = new Promise((resolve, reject) => {
+    resolveCredentials = resolve;
+    rejectCredentials = reject;
+  });
+  const server = createServer(async (request, response) => {
+    const origin = request.headers.origin;
+    const allowed = origin === siteOrigin
+      && request.url === `/device-pair/${state}`;
+    if (!allowed) {
+      response.writeHead(403, { "cache-control": "no-store" }).end();
+      return;
+    }
+    const corsHeaders = {
+      "access-control-allow-origin": siteOrigin,
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "content-type, x-taskboard-pair-state",
+      "access-control-max-age": "60",
+      "cache-control": "no-store",
+      vary: "Origin",
+    };
+    if (request.headers["access-control-request-private-network"] === "true") {
+      corsHeaders["access-control-allow-private-network"] = "true";
+    }
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, corsHeaders).end();
+      return;
+    }
+    if (
+      request.method !== "POST"
+      || request.headers["x-taskboard-pair-state"] !== state
+      || !String(request.headers["content-type"] ?? "").startsWith("application/json")
+    ) {
+      response.writeHead(403, { ...corsHeaders, "content-type": "application/json" })
+        .end(JSON.stringify({ error: "Invalid pairing callback" }));
+      return;
+    }
+
+    try {
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of request) {
+        size += chunk.length;
+        if (size > 8192) {
+          response.writeHead(413, corsHeaders).end();
+          return;
+        }
+        chunks.push(chunk);
+      }
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (
+        payload?.state !== state
+        || new URL(payload?.siteUrl).origin !== siteOrigin
+        || typeof payload?.deviceId !== "string"
+        || typeof payload?.deviceName !== "string"
+        || typeof payload?.deviceToken !== "string"
+        || (
+          payload?.siteAuthorizationToken !== null
+          && typeof payload?.siteAuthorizationToken !== "string"
+        )
+      ) {
+        throw new Error("Invalid pairing credentials");
+      }
+      response.writeHead(204, corsHeaders).end();
+      resolveCredentials(payload);
+    } catch {
+      response.writeHead(400, { ...corsHeaders, "content-type": "application/json" })
+        .end(JSON.stringify({ error: "Invalid pairing credentials" }));
+    }
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new TaskctlError("無法啟動本機配對服務", { code: "PAIRING_LISTENER_FAILED", exitCode: 2 });
+    }
+    const callbackUrl = `http://127.0.0.1:${address.port}/device-pair/${state}`;
+    const pairingUrl = new URL(siteUrl);
+    pairingUrl.searchParams.set("taskboard-device-pair", "1");
+    pairingUrl.searchParams.set("state", state);
+    pairingUrl.searchParams.set("callback", callbackUrl);
+    pairingUrl.searchParams.set("deviceName", deviceName);
+
+    output.write("請在此電腦開啟的瀏覽器登入 Taskboard Sites，並在主要裝置核准配對請求。\n");
+    output.write(`${pairingUrl.href}\n`);
+    try {
+      if (overrides.openUrl) {
+        await overrides.openUrl(pairingUrl.href);
+      } else {
+        const opener = process.platform === "darwin"
+          ? ["open", [pairingUrl.href]]
+          : process.platform === "win32"
+            ? ["rundll32", ["url.dll,FileProtocolHandler", pairingUrl.href]]
+            : ["xdg-open", [pairingUrl.href]];
+        await execFileAsync(opener[0], opener[1], { timeout: 8000, windowsHide: true });
+      }
+    } catch {
+      output.write("若瀏覽器沒有自動開啟，請在此電腦瀏覽器開啟上方連結。\n");
+    }
+
+    const timeout = setTimeout(() => {
+      rejectCredentials(new TaskctlError("配對逾時，請重新執行 taskctl device pair", {
+        code: "PAIRING_TIMEOUT",
+        exitCode: 2,
+      }));
+    }, 11 * 60 * 1000);
+    timeout.unref();
+    let claimData;
+    try {
+      claimData = await credentialsPromise;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const credentials = {
+      siteUrl,
+      deviceId: claimData.deviceId,
+      deviceToken: claimData.deviceToken,
+      ...(claimData.siteAuthorizationToken
+        ? { siteAuthorizationToken: claimData.siteAuthorizationToken }
+        : {}),
+      deviceName: claimData.deviceName || deviceName,
+      pairedAt: new Date().toISOString(),
+    };
+    await saveDeviceCredentials(credentials, overrides.env);
+    await api.request("PUT", "/api/local/cloud-session", {
+      remoteUrl: siteUrl, actorName: credentials.deviceName,
+      deviceToken: credentials.deviceToken, deviceId: credentials.deviceId,
+      siteAuthorizationToken: credentials.siteAuthorizationToken ?? null,
+    });
+    output.write(`裝置配對成功，裝置 ID 為 ${credentials.deviceId}\n`);
+    return {
+      success: true,
+      deviceId: credentials.deviceId,
+      deviceName: credentials.deviceName,
+      siteUrl,
+    };
+  } finally {
+    server.close();
+  }
+}
+
+async function deviceStatus(overrides) {
+  const creds = await loadDeviceCredentials(overrides.env);
+  if (!creds) {
+    return { paired: false, message: "此裝置尚未配對" };
+  }
+  const fetchFn = overrides.fetch ?? globalThis.fetch;
+  let remoteStatus = "unknown";
+  try {
+    const res = await fetchFn(`${creds.siteUrl}/api/devices/${creds.deviceId}/heartbeat`, {
+      method: "POST",
+      headers: {
+        ...deviceRequestHeaders(creds, { contentType: true }),
+      },
+      body: JSON.stringify({ ping: true }),
+    });
+    if (res.ok) {
+      remoteStatus = "connected";
+    } else if (res.status === 401 || res.status === 403) {
+      remoteStatus = "revoked";
+    }
+  } catch {
+    remoteStatus = "unreachable";
+  }
+  return {
+    paired: true,
+    deviceId: creds.deviceId,
+    deviceName: creds.deviceName,
+    siteUrl: creds.siteUrl,
+    pairedAt: creds.pairedAt,
+    remoteStatus,
+  };
+}
+
+async function deviceRevoke(overrides) {
+  const creds = await loadDeviceCredentials(overrides.env);
+  if (!creds) {
+    return { success: true, message: "本機未存有裝置憑證" };
+  }
+  const fetchFn = overrides.fetch ?? globalThis.fetch;
+  const response = await fetchFn(`${creds.siteUrl}/api/devices/${creds.deviceId}/revoke`, {
+    method: "POST",
+    headers: deviceRequestHeaders(creds),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new TaskctlError(
+      payload?.error?.message ?? `無法撤銷裝置憑證（HTTP ${response.status}）`,
+      { code: payload?.error?.code ?? "DEVICE_REVOKE_FAILED", exitCode: 3 },
+    );
+  }
+  await rm(deviceCredentialsPath(overrides.env), { force: true });
+  return { success: true, message: "裝置已撤銷並清除本機憑證" };
+}
+
+async function deviceAgent(overrides, { intervalSeconds = 30, once = false } = {}) {
+  const creds = await loadDeviceCredentials(overrides.env);
+  if (!creds) {
+    throw new TaskctlError("裝置尚未配對，請先執行 taskctl device pair", {
+      code: "NOT_PAIRED",
+      exitCode: 2,
+    });
+  }
+  return runDeviceAgent({
+    credentials: creds,
+    fetch: overrides.fetch ?? globalThis.fetch,
+    intervalSeconds,
+    once,
+    stderr: overrides.stderr ?? process.stderr,
+    ...(overrides.runCodex ? { runCodex: overrides.runCodex } : {}),
   });
 }
 

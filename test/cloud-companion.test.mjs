@@ -103,6 +103,7 @@ test("cloud config persists Basic Auth credentials and device mappings in a mode
     remoteUrl: "https://tasks.example.test",
     actorName: "Alice",
     sharedKey: "two-person-shared-key",
+    deviceId: null, deviceToken: null, siteAuthorizationToken: null,
     projectMappings: {
       portfolio: "/Users/alice/Documents/portfolio",
     },
@@ -642,7 +643,9 @@ test("configured server proxies business APIs without touching local rows and ad
     cloudConfigPath: configPath,
     remoteFetch: async (url, init) => {
       upstreamCalls.push({ url: url.toString(), init });
-      return jsonResponse({ tasks: [{ id: "REMOTE-1", projectId: "portfolio" }] });
+      return jsonResponse(new URL(url).pathname === "/api/meta"
+        ? { realtime: { transport: "websocket", endpoint: "/api/events" } }
+        : { tasks: [{ id: "REMOTE-1", projectId: "portfolio" }] });
     },
   });
   const address = await app.listen({ port: 0 });
@@ -666,8 +669,9 @@ test("configured server proxies business APIs without touching local rows and ad
 
     const response = await fetch(`${baseUrl}/api/tasks`);
     assert.equal(response.status, 200);
-    assert.equal(upstreamCalls.length, 1);
-    assert.equal(upstreamCalls[0].url, "https://tasks.example.test/api/tasks");
+    assert.equal(upstreamCalls.length, 2);
+    assert.equal(upstreamCalls[0].url, "https://tasks.example.test/api/meta");
+    assert.equal(upstreamCalls[1].url, "https://tasks.example.test/api/tasks");
     assert.equal(app.database.listTasks({}).length, 0);
   } finally {
     await app.close();

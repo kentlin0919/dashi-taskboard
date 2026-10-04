@@ -45,6 +45,9 @@ import {
   setApiText,
   setCurrentUserActor,
   syncJiraConnection,
+  fetchProjectDeviceAutomations,
+  updateProjectDeviceAutomation,
+  type DeviceAutomation,
   uploadAttachment,
   updateTask as updateTaskRequest,
 } from "./api";
@@ -64,6 +67,7 @@ import { DashboardView } from "./components/DashboardView";
 import { ProjectReadmeView } from "./components/ProjectReadmeView";
 import { IssueListView } from "./components/IssueListView";
 import { JiraConnectionDialog } from "./components/JiraConnectionDialog";
+import { DeviceManagementDialog } from "./components/DeviceManagementDialog";
 import { ArchivedTasksColumn, OtherTasksPanel } from "./components/OtherTasksPanel";
 import {
   type PendingInlineAttachment,
@@ -839,6 +843,69 @@ export function App() {
   const [jiraSaving, setJiraSaving] = useState(false);
   const [jiraSyncing, setJiraSyncing] = useState(false);
   const [jiraError, setJiraError] = useState<string | null>(null);
+  const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
+  const [projectDeviceAutomations, setProjectDeviceAutomations] = useState<DeviceAutomation[]>([]);
+
+  const [deviceAutomationPending, setDeviceAutomationPending] = useState(false);
+  const [deviceAutomationError, setDeviceAutomationError] = useState<string | null>(null);
+  const deviceAutomationRequestRef = useRef(0);
+  const deviceAutomationProjectRef = useRef(selectedProjectId);
+  deviceAutomationProjectRef.current = selectedProjectId;
+
+  async function refreshDeviceAutomations(projectId: string) {
+    if (!projectId || projectId === ALL_PROJECTS_ID) return;
+    const requestId = ++deviceAutomationRequestRef.current;
+    setDeviceAutomationPending(true);
+    setDeviceAutomationError(null);
+    try {
+      const automations = await fetchProjectDeviceAutomations(projectId);
+      if (requestId === deviceAutomationRequestRef.current && deviceAutomationProjectRef.current === projectId) {
+        setProjectDeviceAutomations(automations);
+      }
+    } catch (error) {
+      if (requestId === deviceAutomationRequestRef.current && deviceAutomationProjectRef.current === projectId) {
+        setDeviceAutomationError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (requestId === deviceAutomationRequestRef.current) setDeviceAutomationPending(false);
+    }
+  }
+
+  useEffect(() => {
+    ++deviceAutomationRequestRef.current;
+    setProjectDeviceAutomations([]);
+    setDeviceAutomationError(null);
+    setDeviceAutomationPending(false);
+  }, [selectedProjectId]);
+
+  async function handleDeviceAutomationChange(
+    deviceId: string,
+    options: {
+      enabledByUser: boolean;
+      quotaAware: boolean;
+      intervalMinutes: number;
+      model: string;
+      reasoningEffort: string;
+      workspacePath?: string;
+    }
+  ) {
+    const projectId = selectedProjectId;
+    if (!projectId) return;
+    setDeviceAutomationPending(true);
+    setDeviceAutomationError(null);
+    try {
+      await updateProjectDeviceAutomation(projectId, deviceId, options);
+      if (deviceAutomationProjectRef.current === projectId) await refreshDeviceAutomations(projectId);
+    } catch (error) {
+      if (deviceAutomationProjectRef.current === projectId) {
+        setDeviceAutomationError(error instanceof Error ? error.message : String(error));
+        // Restore the saved settings after a rejected write.
+        setProjectDeviceAutomations((current) => [...current]);
+      }
+    } finally {
+      if (deviceAutomationProjectRef.current === projectId) setDeviceAutomationPending(false);
+    }
+  }
   const [pendingProjectDelete, setPendingProjectDelete] = useState<ProjectChoice | null>(null);
   const [projectDeleteIssueCount, setProjectDeleteIssueCount] = useState<number | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
@@ -853,6 +920,7 @@ export function App() {
   } | null>(null);
   const [automationCatalogLoading, setAutomationCatalogLoading] = useState(false);
   const [automationCatalogError, setAutomationCatalogError] = useState<string | null>(null);
+  const [automationCatalogRetry, setAutomationCatalogRetry] = useState(0);
   const projectsRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
   const tasksRef = useRef<Task[]>([]);
@@ -964,6 +1032,7 @@ export function App() {
       selectedProject.id,
       controller.signal,
       selectedCodexProjectIdentity,
+      "models",
     ).then(
       (catalog) => {
         if (controller.signal.aborted) return;
@@ -980,6 +1049,7 @@ export function App() {
     );
     return () => controller.abort();
   }, [
+    automationCatalogRetry,
     localAiChatAvailable,
     selectedCodexProjectIdentity?.codexHostId,
     selectedCodexProjectIdentity?.codexProjectId,
@@ -2175,8 +2245,17 @@ export function App() {
       },
       onInvalidate: invalidateCloudData,
     });
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void poller.refresh();
+    };
     poller.start();
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("online", refreshWhenVisible);
     return () => {
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("online", refreshWhenVisible);
       controller.abort();
       poller.stop();
     };
@@ -3524,6 +3603,19 @@ export function App() {
                         type="button"
                         role="menuitem"
                         disabled={openingProjectId !== null}
+                        onClick={() => {
+                          setProjectMenuOpen(false);
+                          setProjectContextMenu(null);
+                          setDeviceDialogOpen(true);
+                        }}
+                      >
+                        <LinearIcon name="terminal" className="project-avatar" color="currentColor" width={16} height={16} />
+                        <span>{text("设备管理与配对", "Device Management")}</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={openingProjectId !== null}
                         onClick={openCreateProjectDialog}
                       >
                         <PlusIcon className="project-avatar" color="currentColor" size={16} />
@@ -3542,12 +3634,26 @@ export function App() {
             {selectedProject && (
               <ProjectAutomationMenu
                 automation={selectedProjectAutomation}
+                deviceAutomations={projectDeviceAutomations}
                 models={automationModels}
-                pending={automationPending || automationCatalogLoading}
-                error={automationCatalogError ?? automationError}
+                deviceMode={taskboardMetadata?.mode === "cloud"}
+                pending={taskboardMetadata?.mode === "cloud" || projectDeviceAutomations.length > 0
+                  ? deviceAutomationPending : automationPending || automationCatalogLoading}
+                error={taskboardMetadata?.mode === "cloud" || projectDeviceAutomations.length > 0
+                  ? deviceAutomationError : automationCatalogError ?? automationError}
                 unavailableReason={automationProjectContext.unavailableReason}
-                onOpen={() => void reconcileProjectAutomation()}
+                onOpen={() => {
+                  if (selectedProjectId) void refreshDeviceAutomations(selectedProjectId);
+                  if (taskboardMetadata?.mode === "cloud") return;
+                  if (automationCatalogError && !automationCatalogLoading) {
+                    setAutomationCatalogRetry((attempt) => attempt + 1);
+                  } else {
+                    void reconcileProjectAutomation();
+                  }
+                }}
                 onChange={(options) => void saveProjectAutomation(options)}
+                onDeviceChange={handleDeviceAutomationChange}
+                onOpenDeviceManagement={() => setDeviceDialogOpen(true)}
               />
             )}
             {isJiraProject && (
@@ -3998,6 +4104,11 @@ export function App() {
           onSave={saveJiraConnection}
         />
       )}
+
+      <DeviceManagementDialog
+        open={deviceDialogOpen}
+        onClose={() => setDeviceDialogOpen(false)}
+      />
 
       {projectCreateOpen && (
         <div

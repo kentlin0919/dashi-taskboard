@@ -17,6 +17,9 @@ function emptyConfig() {
     remoteUrl: null,
     actorName: null,
     sharedKey: null,
+    deviceToken: null,
+    deviceId: null,
+    siteAuthorizationToken: null,
     projectMappings: {},
   };
 }
@@ -96,20 +99,42 @@ function parseConfig(value) {
     "remoteUrl",
     "actorName",
     "sharedKey",
+    "deviceToken",
+    "deviceId",
+    "siteAuthorizationToken",
     "projectMappings",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
     throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud companion configuration is invalid");
   }
   const projectMappings = validateProjectMappings(value.projectMappings);
-  if (value.remoteUrl === null && value.actorName === null && value.sharedKey === null) {
+  const siteAuthorizationToken = value.siteAuthorizationToken ?? null;
+  if (siteAuthorizationToken !== null && (typeof siteAuthorizationToken !== "string" || !siteAuthorizationToken || /[\r\n]/.test(siteAuthorizationToken))) {
+    throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Sites authorization token is invalid");
+  }
+  if (value.remoteUrl === null && value.actorName === null && value.sharedKey === null
+    && !value.deviceToken && !value.deviceId) {
     return { ...emptyConfig(), projectMappings };
   }
+  const deviceToken = value.deviceToken ?? null;
+  const deviceId = value.deviceId ?? null;
+  if (deviceToken !== null) {
+    if (typeof deviceToken !== "string" || !deviceToken || deviceToken.length > 4096 || /[\r\n]/.test(deviceToken)
+      || typeof deviceId !== "string" || !deviceId || deviceId.length > 120
+      || typeof value.actorName !== "string" || !value.actorName.trim()) {
+      throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud device credentials are invalid");
+    }
+    return { version: CONFIG_VERSION, remoteUrl: normalizeCloudUrl(value.remoteUrl),
+      actorName: value.actorName.trim(), sharedKey: null, deviceToken, deviceId, siteAuthorizationToken, projectMappings };
+  }
+  if (deviceId !== null) throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud device token is required");
   const credentials = validateCredentials(value.actorName, value.sharedKey);
   return {
     version: CONFIG_VERSION,
     remoteUrl: normalizeCloudUrl(value.remoteUrl),
     ...credentials,
+    deviceToken: null, deviceId: null,
+    siteAuthorizationToken,
     projectMappings,
   };
 }
@@ -128,6 +153,7 @@ export function createCloudConfigStore({ configPath }) {
   }
 
   async function writeAtomically(config) {
+    config = parseConfig(config);
     await mkdir(path.dirname(configPath), { recursive: true });
     const temporaryPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
@@ -149,13 +175,16 @@ export function createCloudConfigStore({ configPath }) {
       await pendingWrite;
       return readFromDisk();
     },
-    async configure({ remoteUrl, actorName, sharedKey }) {
+    async configure({ remoteUrl, actorName, sharedKey, deviceToken = null, deviceId = null, siteAuthorizationToken = null }) {
       const normalizedUrl = normalizeCloudUrl(remoteUrl);
-      const credentials = validateCredentials(actorName, sharedKey);
+      const credentials = deviceToken === null
+        ? { ...validateCredentials(actorName, sharedKey), deviceToken: null, deviceId: null }
+        : { actorName, sharedKey: null, deviceToken, deviceId };
       return update((config) => ({
         ...config,
         remoteUrl: normalizedUrl,
         ...credentials,
+        siteAuthorizationToken,
       }));
     },
     clearCloud() {
@@ -164,6 +193,8 @@ export function createCloudConfigStore({ configPath }) {
         remoteUrl: null,
         actorName: null,
         sharedKey: null,
+        deviceToken: null, deviceId: null,
+        siteAuthorizationToken: null,
       }));
     },
     setProjectWorkspace(projectId, workspacePath) {

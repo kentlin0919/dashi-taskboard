@@ -45,6 +45,7 @@ export function createRevisionPoller({
       timer = scheduleInterval(poll, intervalMs);
       void poll();
     },
+    refresh: poll,
     stop() {
       if (!running) return;
       running = false;

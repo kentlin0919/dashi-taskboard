@@ -1960,6 +1960,7 @@ export function createTaskboardServer(options = {}) {
               mode: "cloud",
               remoteUrl: config.remoteUrl,
               actorName: config.actorName,
+              ...(config.deviceId ? { deviceId: config.deviceId } : {}),
               authenticated: true,
             }
             : { mode: "local", authenticated: false });
@@ -1967,17 +1968,21 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "PUT") {
           const body = await readJson(request);
           assertPlainObject(body);
-          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey"]));
+          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey", "deviceToken", "deviceId", "siteAuthorizationToken"]));
           try {
             const config = await cloudConfig.configure({
               remoteUrl: body.remoteUrl,
               actorName: body.actorName,
               sharedKey: body.sharedKey,
+              deviceToken: body.deviceToken,
+              deviceId: body.deviceId,
+              siteAuthorizationToken: body.siteAuthorizationToken,
             });
             return sendJson(response, 200, {
               mode: "cloud",
               remoteUrl: config.remoteUrl,
               actorName: config.actorName,
+              ...(config.deviceId ? { deviceId: config.deviceId } : {}),
               authenticated: true,
             });
           } catch (error) {
@@ -2076,6 +2081,12 @@ export function createTaskboardServer(options = {}) {
         if ([...url.searchParams.keys()].length > 0) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/meta does not accept query parameters");
         }
+        let cloudMetadata = null;
+        if (capabilityCloudConfig?.remoteUrl) {
+          const upstream = await cloudProxy.forward(new Request("http://127.0.0.1/api/meta"));
+          if (!upstream.ok) return sendFetchResponse(response, upstream);
+          cloudMetadata = await upstream.json();
+        }
         return sendJson(response, 200, {
           ...(configuredTrustedRequest ? {} : { manageTaskboardSkillPath: resolved.skillPath }),
           capabilities: {
@@ -2085,10 +2096,7 @@ export function createTaskboardServer(options = {}) {
           ...(capabilityCloudConfig?.remoteUrl
             ? {
               mode: "cloud",
-              realtime: {
-                transport: "websocket",
-                endpoint: "/api/events",
-              },
+              realtime: cloudMetadata.realtime,
               localCapabilities: { available: !configuredTrustedRequest },
             }
             : {}),
@@ -2103,12 +2111,17 @@ export function createTaskboardServer(options = {}) {
           "codexProjectKind",
           "codexHostId",
           "workspacePath",
+          "scope",
         ]), "GET /api/local/ai/catalog");
+        const scope = url.searchParams.get("scope") ?? "full";
+        if (scope !== "full" && scope !== "models") {
+          throw new ApiError(400, "INVALID_SCOPE", "Catalog scope must be full or models");
+        }
         const projectId = validateProjectId(url.searchParams.get("projectId") ?? undefined);
         return sendJson(
           response,
           200,
-          await aiChat.getCatalog(projectId, undefined, aiExecutionTargetFromQuery(url.searchParams)),
+          await aiChat.getCatalog(projectId, undefined, aiExecutionTargetFromQuery(url.searchParams), scope),
         );
       }
 

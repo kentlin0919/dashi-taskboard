@@ -11,6 +11,7 @@ import {
   discoverAiCatalog,
   loadSlashCommands,
   resolveAiWorkspace,
+  sanitizeAppServerModels,
 } from "./ai-chat-catalog.mjs";
 import { CodexAppServer, CodexHostAppServer } from "./codex-app-server.mjs";
 import {
@@ -268,8 +269,23 @@ export class AiChatService {
     });
   }
 
-  async getCatalog(projectId, resolvedContext, codexTarget) {
+  async getCatalog(projectId, resolvedContext, codexTarget, scope = "full") {
     const resolved = resolvedContext ?? await this.resolveContext(projectId, undefined, codexTarget);
+    if (scope === "models") {
+      const { appServer } = this.#runtimeForTarget(resolved);
+      try {
+        const result = await appServer.request("model/list", {
+          cursor: null, limit: 100, includeHidden: false,
+        });
+        const models = sanitizeAppServerModels(result?.data);
+        if (models.length === 0) throw new Error("Empty model catalog");
+        return { models, skills: [], commands: [], sandboxes: [] };
+      } catch (error) {
+        console.error("Could not load automation models", error);
+        throw new ApiError(503, "AI_MODELS_UNAVAILABLE",
+          "Could not load Codex models. Check that Codex is signed in, then reopen this menu to retry.");
+      }
+    }
     if (resolved.codexProjectKind === "remote") {
       const { appServer } = this.#runtimeForTarget(resolved);
       return discoverAppServerAiCatalog({ appServer, workspacePath: resolved.workspacePath });

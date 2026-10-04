@@ -260,8 +260,10 @@ export async function getAiChatCatalog(
   projectId: string,
   signal?: AbortSignal,
   codexProjectIdentity?: CodexProjectIdentity | null,
+  scope: "full" | "models" = "full",
 ): Promise<AiChatCatalog> {
   const query = new URLSearchParams();
+  if (scope === "models") query.set("scope", scope);
   if (codexProjectIdentity) {
     query.set("codexProjectId", codexProjectIdentity.codexProjectId);
     query.set("codexProjectKind", codexProjectIdentity.codexProjectKind);
@@ -805,4 +807,153 @@ export function resolvePersistedAttachmentUrl(value: string): string {
     return value;
   }
   return value;
+}
+
+export interface Device {
+  id: string;
+  name: string;
+  status: "active" | "revoked";
+  last_heartbeat_at: string | null;
+  last_status: {
+    isRunning?: boolean;
+    currentTaskId?: string | null;
+  } | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PairingRequest {
+  id: string;
+  pairing_code: string;
+  device_name: string;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface DeviceScheduleState {
+  status: "ACTIVE" | "PAUSED" | "UNKNOWN";
+  automationId?: string | null;
+  checkedAt?: string;
+  nextRunAt?: number | null;
+  idleReason?: "checking-todos" | "waiting-todos" | "no-todos" | null;
+  error?: string;
+  quota?: { state: string; checkedAt?: number; resetsAt?: number } | null;
+  appliedSettings?: {
+    enabledByUser: boolean;
+    quotaAware: boolean;
+    intervalMinutes: number;
+    model: string;
+    reasoningEffort: string;
+    workspacePath: string;
+  };
+}
+
+export interface DeviceAutomation {
+  deviceId: string;
+  deviceName: string;
+  deviceStatus: "active" | "revoked";
+  scheduleState: DeviceScheduleState | null;
+  canManage?: boolean;
+  lastHeartbeatAt: string | null;
+  lastStatus: {
+    isRunning?: boolean;
+    currentTaskId?: string | null;
+    models?: import("./types").AiChatModel[];
+  } | null;
+  enabledByUser: boolean;
+  quotaAware: boolean;
+  intervalMinutes: number;
+  model: string;
+  reasoningEffort: string;
+  workspacePath: string | null;
+}
+
+export async function fetchDeviceCloudSession(): Promise<{ remoteUrl?: string; deviceId?: string }> {
+  try {
+    return await request("/api/local/cloud-session");
+  } catch (error) {
+    if (error instanceof ApiError && (error.code === "LOCAL_COMPANION_REQUIRED" || error.code === "LOCAL_ONLY" || error.status === 404)) return {};
+    throw error;
+  }
+}
+
+export async function fetchDevices(): Promise<Device[]> {
+  const data = await request<{ devices: Device[] }>("/api/devices");
+  return data.devices ?? [];
+}
+
+export async function fetchPairingRequests(): Promise<PairingRequest[]> {
+  const data = await request<{ requests: PairingRequest[] }>("/api/devices/pair/requests");
+  return data.requests ?? [];
+}
+
+export async function requestDevicePairingCode(deviceName: string): Promise<{
+  pairingCode: string;
+  expiresAt: string;
+}> {
+  return request("/api/devices/pair/request", {
+    method: "POST",
+    body: JSON.stringify({ deviceName }),
+  });
+}
+
+export async function claimDevicePairingCode(pairingCode: string): Promise<{
+  status: "pending" | "rejected" | "approved";
+  deviceId?: string;
+  deviceToken?: string;
+  deviceName?: string;
+  siteAuthorizationToken?: string | null;
+}> {
+  return request("/api/devices/pair/claim", {
+    method: "POST",
+    body: JSON.stringify({ pairingCode }),
+  });
+}
+
+export async function approvePairingRequest(pairingCode: string): Promise<{ success: boolean; deviceId: string; deviceName: string }> {
+  return request("/api/devices/pair/approve", {
+    method: "POST",
+    body: JSON.stringify({ pairingCode }),
+  });
+}
+
+export async function rejectPairingRequest(pairingCode: string): Promise<{ success: boolean }> {
+  return request("/api/devices/pair/reject", {
+    method: "POST",
+    body: JSON.stringify({ pairingCode }),
+  });
+}
+
+export async function revokeDevice(deviceId: string): Promise<{ success: boolean }> {
+  return request(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, {
+    method: "POST",
+  });
+}
+
+export async function fetchProjectDeviceAutomations(projectId: string): Promise<DeviceAutomation[]> {
+  const data = await request<{ automations: DeviceAutomation[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/devices/automations`
+  );
+  return data.automations ?? [];
+}
+
+export async function updateProjectDeviceAutomation(
+  projectId: string,
+  deviceId: string,
+  settings: {
+    enabledByUser: boolean;
+    quotaAware: boolean;
+    intervalMinutes: number;
+    model: string;
+    reasoningEffort: string;
+    workspacePath?: string;
+  }
+): Promise<{ success: boolean }> {
+  return request(
+    `/api/projects/${encodeURIComponent(projectId)}/devices/${encodeURIComponent(deviceId)}/automation`,
+    {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }
+  );
 }

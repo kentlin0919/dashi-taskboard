@@ -26,6 +26,9 @@ async function requireCloudImplementation() {
 
 export async function createCloudWorkerHarness({
   sharedSecret = "two-person-shared-secret",
+  siteBypassToken,
+  siteAuthEnabled = false,
+  siteMigrationEnabled = false,
 } = {}) {
   await requireCloudImplementation();
   const persistenceRoot = await mkdtemp(path.join(os.tmpdir(), "taskboard-cloud-worker-"));
@@ -37,6 +40,9 @@ export async function createCloudWorkerHarness({
     bindings: {
       TASKBOARD_ENVIRONMENT: "production",
       TASKBOARD_SHARED_SECRET: sharedSecret,
+      ...(siteBypassToken ? { TASKBOARD_SITE_BYPASS_TOKEN: siteBypassToken } : {}),
+      ...(siteAuthEnabled ? { TASKBOARD_SITES_AUTH_ENABLED: "1" } : {}),
+      ...(siteMigrationEnabled ? { TASKBOARD_MIGRATION_ENABLED: "1" } : {}),
     },
     d1Databases: { DB: "taskboard-test" },
     r2Buckets: { ATTACHMENTS: "taskboard-test-attachments" },

@@ -41,6 +41,8 @@ export function codexExecutableInApp(appPath, platform = process.platform) {
     return path.win32.join(path.win32.dirname(appPath), "resources", "codex.exe");
   }
   if (platform === "linux") return "/usr/lib/chatgpt/resources/codex";
+  const nested = path.join(appPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex");
+  if (executableFile(nested)) return nested;
   return path.join(appPath, "Contents", "Resources", "codex");
 }
 

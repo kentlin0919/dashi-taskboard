@@ -25,6 +25,8 @@ import {
   reconcileInjectionRuntime,
   restartResidentInjector,
 } from "./codex-injector-runtime.mjs";
+import { sanitizeAppServerModels } from "../server/ai-chat-catalog.mjs";
+import { runDeviceAgent } from "../cli/device-agent.mjs";
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
 import { createTaskboardSupervisor } from "./taskboard-supervisor.mjs";
 import {
@@ -95,6 +97,7 @@ const hostCapability = randomUUID();
 const injectionSourceHashName = "__CODEX_TASKBOARD_SOURCE_HASH__";
 const injectionScriptIdentifierName = "__CODEX_TASKBOARD_SCRIPT_IDENTIFIER__";
 const codexAutomationMethods = new Set([
+  "get-global-state",
   "list-automations",
   "automation-create",
   "automation-update",
@@ -110,6 +113,10 @@ const quotaPolicyCdps = new Set();
 const restoredQuotaPolicyCdps = new WeakSet();
 const quotaPolicyRestorePromises = new WeakMap();
 const remoteAutomationTurnWaiters = new Map();
+let devicePolicyTimer = null;
+let devicePolicySyncInFlight = false;
+const devicePolicySnapshots = new Map();
+const devicePolicyProjects = new Set();
 let quotaPoliciesLoadPromise = null;
 let quotaPoliciesWritePromise = Promise.resolve();
 const taskConversationAppServerTimeoutMs = 30_000;
@@ -1476,8 +1483,7 @@ function remoteAutomationTurnText(turn) {
     .find((item) => item.type === "agentMessage")?.text?.trim() || "";
 }
 
-async function remoteAutomationCanStart(cdp, request, task, comments) {
-  const latestComment = comments.at(-1);
+async function remoteAutomationCanStart(cdp, request, task, comments, attachments = []) {
   const started = await requestCodexAppServerViaCdp(
     cdp,
     undefined,
@@ -1512,18 +1518,18 @@ async function remoteAutomationCanStart(cdp, request, task, comments) {
           type: "text",
           text: [
             "你是 Codex Taskboard 自动认领 Agent。只判断下面的议题当前是否允许开始。",
-            "根据完整描述和最新评论做语义判断：若任一处明确要求等待、暂不执行或当前不应开始，decision 为 wait；否则 decision 为 start。不要调用工具，不要解释。",
+            "根据完整描述、全部评论及附件清单判断当前有效要求。后续使用者明确撤回等待或批准开始，可以取代旧等待要求；未被明确取代的等待、暂不执行或待确认要求仍然有效，decision 为 wait。执行 Agent 的进度留言不能自行解除使用者的等待要求。否则 decision 为 start。这里只判断开始许可，不授权读取代码或实施。不要调用工具，不要解释。",
             JSON.stringify({
               identifier: task.identifier,
               title: task.title,
               description: task.description,
-              latestComment: latestComment
-                ? {
-                    authorName: latestComment.authorName,
-                    createdAt: latestComment.createdAt,
-                    body: latestComment.body,
-                  }
-                : null,
+              comments: comments.map((comment) => ({
+                id: comment.id, version: comment.version,
+                authorName: comment.authorName, authorType: comment.authorType,
+                createdAt: comment.createdAt, updatedAt: comment.updatedAt,
+                body: comment.body, attachments: comment.attachments ?? [],
+              })),
+              attachments,
             }),
           ].join("\n\n"),
         }],
@@ -1590,7 +1596,7 @@ async function runRemoteTaskboardAutomation(record) {
     ]);
     if (!eligibleRemoteAutomationTask(task) || task.projectId !== request.taskboardProjectId) return;
     const cdp = currentQuotaPolicyCdp();
-    if (!(await remoteAutomationCanStart(cdp, request, task, comments))) continue;
+    if (!(await remoteAutomationCanStart(cdp, request, task, comments, attachments))) continue;
     selected = { taskPath, commentsPath, attachmentsPath, task, comments, attachments, cdp };
     break;
   }
@@ -1779,6 +1785,16 @@ function remoteAutomationItem(request, status, nextRunAt) {
   };
 }
 
+async function assertCloudAutomationSource(request) {
+  if (!request.cloudUrl) return;
+  const session = await taskboardRequest("/api/local/cloud-session");
+  if (session.mode !== "cloud" || session.authenticated !== true
+    || typeof session.remoteUrl !== "string"
+    || session.remoteUrl.replace(/\/+$/, "") !== request.cloudUrl.replace(/\/+$/, "")) {
+    throw new Error("本機 companion 尚未登入配對的雲端任務面板，已停止此裝置的自動認領");
+  }
+}
+
 async function localAutomationTodoInputs(request, tasks) {
   // Local cron can also continue complete or legacy bindings. Do not use the
   // remote worker's eligibility filter here, or inspect in_progress workers.
@@ -1787,14 +1803,16 @@ async function localAutomationTodoInputs(request, tasks) {
     && task.status === "todo"
     && task.archivedAt === null
     && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done")
-  )).map(async (task) => ({
-    task,
-    comments: (await taskboardRequest(`/api/tasks/${encodeURIComponent(task.id)}/comments`)).comments,
-  })));
-  const snapshot = createHash("sha256").update(JSON.stringify(candidates.map(({ task, comments }) => [
-    task.id, task.version, task.title, task.description,
-    task.threadId, task.threadBinding, task.relations?.blockedBy,
-    comments.at(-1) ?? null,
+  )).map(async (task) => {
+    const [{ comments }, { attachments }] = await Promise.all([
+      taskboardRequest(`/api/tasks/${encodeURIComponent(task.id)}/comments`),
+      taskboardRequest(`/api/tasks/${encodeURIComponent(task.id)}/attachments`),
+    ]);
+    return { task, comments, attachments };
+  }));
+  const snapshot = createHash("sha256").update(JSON.stringify(candidates.map(({ task, comments, attachments }) => [
+    task.id, task.threadId, task.threadBinding,
+    remoteAutomationSnapshot(task, comments, attachments),
   ]))).digest("hex");
   return { candidates, snapshot };
 }
@@ -1815,6 +1833,7 @@ async function localAutomationTodoGate(request, tasks, previousGate, evaluatedTo
 
 async function evaluateLocalAutomationTodos(record) {
   const { request, version, todoGate } = record;
+  await assertCloudAutomationSource(request);
   const stillCurrent = () => quotaPolicyRecords.get(request.taskboardProjectId)?.version === version;
   const listed = await taskboardRequest(
     `/api/tasks?projectId=${encodeURIComponent(request.taskboardProjectId)}&status=todo`,
@@ -1822,9 +1841,9 @@ async function evaluateLocalAutomationTodos(record) {
   const { candidates, snapshot } = await localAutomationTodoInputs(request, listed.tasks);
   if (!stillCurrent() || snapshot !== todoGate?.snapshot || todoGate.state !== "checking") return;
   let state = "wait";
-  for (const { task, comments } of candidates) {
+  for (const { task, comments, attachments } of candidates) {
     if (!stillCurrent()) return;
-    if (await remoteAutomationCanStart(currentQuotaPolicyCdp(), request, task, comments)) {
+    if (await remoteAutomationCanStart(currentQuotaPolicyCdp(), request, task, comments, attachments)) {
       state = "start";
       break;
     }
@@ -1841,6 +1860,7 @@ async function applyTaskboardAutomationPolicy(
     previousTodoGate, evaluatedTodoGate,
   } = {},
 ) {
+  if (request.enabledByUser) await assertCloudAutomationSource(request);
   const todoResponse = request.enabledByUser
     ? await fetch(
       `${taskboardBaseUrl}/api/tasks?projectId=${encodeURIComponent(request.taskboardProjectId)}&status=todo`,
@@ -1856,7 +1876,9 @@ async function applyTaskboardAutomationPolicy(
   }
   const hasTodo = todoPayload ? todoPayload.tasks.length > 0 : null;
   const quota = request.quotaAware && hasTodo !== false
-    ? await readCodexQuotaStatus(request.model)
+    ? await readCodexQuotaStatus(request.model, (method, params) => requestCodexAppServerViaCdp(
+      currentQuotaPolicyCdp(), undefined, request.codexHostId, method, params,
+    ))
     : null;
   if (!stillCurrent()) return { quota, stale: true };
   if (request.codexProjectKind === "remote") {
@@ -1903,7 +1925,10 @@ async function applyTaskboardAutomationPolicy(
         : null
     ) ?? items[0];
   }
-  let todoGate = request.enabledByUser && hasTodo ? previousTodoGate : undefined;
+  let todoGate = request.enabledByUser && hasTodo ? previousTodoGate
+    : request.enabledByUser && request.cloudUrl && hasTodo === false
+      ? { snapshot: "empty", state: "wait" }
+      : undefined;
   let operation = taskboardAutomationPolicyOperation(request, {
     explicit,
     hasTodo,
@@ -1939,6 +1964,7 @@ function storedAutomationPolicy(request) {
     codexProjectId: request.codexProjectId,
     codexProjectKind: request.codexProjectKind,
     codexHostId: request.codexHostId,
+    ...(request.cloudUrl ? { cloudUrl: request.cloudUrl } : {}),
     projectName: request.projectName,
     workspacePath: request.workspacePath,
     remoteProjects: request.remoteProjects ?? [],
@@ -1954,7 +1980,7 @@ function storedAutomationPolicy(request) {
 
 function restoredAutomationPolicy(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { nextRunAt, quota, todoGate, ...stored } = value;
+  const { nextRunAt, quota, todoGate, deviceId, runtime, ...stored } = value;
   const request = parseTaskboardAutomationHostRequest({
     ...stored,
     id: "restored-policy",
@@ -1965,6 +1991,7 @@ function restoredAutomationPolicy(value) {
   return request
     ? {
       request,
+      ...(typeof deviceId === "string" ? { deviceId } : {}),
       ...(quota ? { quota } : {}),
       ...(todoGate && typeof todoGate.snapshot === "string"
         && ["checking", "wait", "start"].includes(todoGate.state) ? { todoGate } : {}),
@@ -1986,6 +2013,7 @@ async function ensureQuotaPoliciesLoaded() {
     for (const value of Object.values(stored)) {
       const restored = restoredAutomationPolicy(value);
       if (!restored) continue;
+      if (restored.deviceId) devicePolicyProjects.add(restored.request.taskboardProjectId);
       quotaPolicyRecords.set(restored.request.taskboardProjectId, {
         version: 1,
         ...restored,
@@ -2001,8 +2029,10 @@ function persistQuotaPolicies() {
       projectId,
       {
         ...storedAutomationPolicy(record.request),
+        ...(record.deviceId ? { deviceId: record.deviceId } : {}),
         ...(record.quota ? { quota: record.quota } : {}),
         ...(record.todoGate ? { todoGate: record.todoGate } : {}),
+        ...(record.runtime ? { runtime: record.runtime } : {}),
         ...(Number.isFinite(record.nextRunAt) ? { nextRunAt: record.nextRunAt } : {}),
       },
     ]),
@@ -2111,7 +2141,7 @@ function enqueueQuotaPolicyMutation(record, rpc, { explicit = false, evaluatedTo
         },
       );
       if (result.stale) return result;
-      if (result.hasTodo === false && result.operation === "pause") {
+      if (result.hasTodo === false && result.operation === "pause" && !current.request.cloudUrl) {
         current.version += 1;
         current.request = { ...current.request, enabledByUser: false };
       } else if (!explicit && result.operation === "list" && result.item?.status === "PAUSED") {
@@ -2133,6 +2163,22 @@ function enqueueQuotaPolicyMutation(record, rpc, { explicit = false, evaluatedTo
       else delete current.todoGate;
       if (current.request.quotaAware && result.quota) current.quota = result.quota;
       else if (!current.request.quotaAware) delete current.quota;
+      current.runtime = {
+        status: result.item?.status ?? "UNKNOWN",
+        automationId: result.item?.id ?? current.request.automationId ?? null,
+        checkedAt: new Date().toISOString(),
+        nextRunAt: result.item?.nextRunAt ?? null,
+        idleReason: result.idleReason ?? (result.hasTodo === false ? "no-todos" : null),
+        quota: current.quota ?? null,
+        appliedSettings: {
+          enabledByUser: current.request.enabledByUser,
+          quotaAware: current.request.quotaAware,
+          intervalMinutes: current.request.intervalMinutes,
+          model: current.request.model,
+          reasoningEffort: current.request.reasoningEffort,
+          workspacePath: current.request.workspacePath,
+        },
+      };
       await persistQuotaPolicies();
       scheduleQuotaPolicyCheck(current, result);
       return result;
@@ -2150,6 +2196,7 @@ async function updateAndApplyQuotaPolicy(request, rpc) {
   const record = {
     version: (previous?.version ?? 0) + 1,
     request,
+    ...(previous?.deviceId ? { deviceId: previous.deviceId } : {}),
     ...(request.quotaAware && previous?.quota ? { quota: previous.quota } : {}),
   };
   quotaPolicyRecords.set(request.taskboardProjectId, record);
@@ -2219,6 +2266,126 @@ async function enqueueCurrentQuotaPolicy(projectId, { evaluatedTodoGate } = {}) 
   );
 }
 
+async function synchronizeDevicePolicies() {
+  if (devicePolicySyncInFlight) return;
+  devicePolicySyncInFlight = true;
+  const rpc = (method, body) => requestCodexAutomationViaCdp(currentQuotaPolicyCdp(), undefined, method, body);
+  const pauseProject = async (projectId) => {
+    const stored = quotaPolicyRecords.get(projectId)?.request;
+    if (stored) await updateAndApplyQuotaPolicy({ ...stored, enabledByUser: false }, rpc);
+    devicePolicySnapshots.delete(projectId);
+  };
+  try {
+    await ensureQuotaPoliciesLoaded();
+    const credentials = JSON.parse(await readFile(path.join(taskboardDataDirectory, "device-credentials.json"), "utf8"));
+    let companionConfigured = false;
+    let deviceModels;
+    try {
+      const catalog = await requestCodexAppServerViaCdp(currentQuotaPolicyCdp(), undefined, "local", "model/list", { limit: 100 });
+      deviceModels = sanitizeAppServerModels(catalog.data);
+    } catch (error) {
+      console.error(`Device model catalog unavailable: ${error.message}`);
+    }
+    const result = await runDeviceAgent({
+      credentials, once: true, models: deviceModels,
+      readStatus: () => ({
+        automations: Object.fromEntries([...quotaPolicyRecords].filter(([, record]) => record.deviceId === credentials.deviceId).map(([id, record]) => [id, record.runtime ?? { status: "UNKNOWN" }])),
+      }),
+      onAutomationError: async (projectId, error) => {
+        const record = quotaPolicyRecords.get(projectId);
+        if (record) {
+          record.deviceId = credentials.deviceId;
+          record.runtime = { ...record.runtime, error: error.message, checkedAt: new Date().toISOString() };
+          await persistQuotaPolicies();
+        }
+      },
+      applyAutomation: async (automation) => {
+        const projectId = automation.projectId;
+        if (!companionConfigured) {
+          await taskboardRequest("/api/local/cloud-session", { method: "PUT", body: {
+            remoteUrl: credentials.siteUrl, actorName: credentials.deviceName || credentials.deviceId,
+            deviceToken: credentials.deviceToken, deviceId: credentials.deviceId,
+            siteAuthorizationToken: credentials.siteAuthorizationToken ?? null,
+          } });
+          companionConfigured = true;
+        }
+        const snapshot = JSON.stringify([credentials.siteUrl, credentials.deviceId, automation]);
+        if (devicePolicySnapshots.get(projectId) === snapshot
+          && quotaPolicyRecords.get(projectId)?.request.enabledByUser === automation.enabledByUser) {
+          await enqueueCurrentQuotaPolicy(projectId);
+          return;
+        }
+        if (!automation.enabledByUser) {
+          await pauseProject(projectId);
+          devicePolicySnapshots.set(projectId, snapshot);
+          return;
+        }
+        const response = await rpc("get-global-state", { key: "local-projects" });
+        const projects = response.value ?? {};
+        const matches = Object.entries(projects).filter(([, project]) => (
+          Array.isArray(project?.rootPaths)
+          && project.rootPaths.some((root) => normalizeRemoteWorkspace(root) === normalizeRemoteWorkspace(automation.workspacePath))
+        ));
+        if (matches.length !== 1) {
+          await pauseProject(projectId);
+          throw new Error(`專案 ${projectId} 的目錄必須對應到一個已加入 Codex App 的專案`);
+        }
+        const [codexProjectId, project] = matches[0];
+        const catalog = await requestCodexAppServerViaCdp(currentQuotaPolicyCdp(), undefined, "local", "model/list", { limit: 100 });
+        const models = sanitizeAppServerModels(catalog.data);
+        const selectedModel = automation.model
+          ? models.find((model) => model.slug === automation.model)
+          : models.find((model) => model.slug === catalog.data.find((raw) => raw.isDefault === true)?.model) ?? models[0];
+        if (!selectedModel) throw new Error("無法確認此裝置可使用的 Codex 模型");
+        const reasoningEffort = automation.reasoningEffort || selectedModel.defaultReasoningEffort;
+        if (!selectedModel.supportedReasoningEfforts.includes(reasoningEffort)) {
+          throw new Error("此裝置不支援排程選定的推理強度");
+        }
+        const request = {
+          taskboardProjectId: projectId, codexProjectId, cloudUrl: credentials.siteUrl,
+          codexProjectKind: "local", codexHostId: "local",
+          projectName: project.name || projectId,
+          workspacePath: automation.workspacePath,
+          skillPath: path.join(projectRoot, "skills", "manage-taskboard", "SKILL.md"),
+          operation: "apply-policy",
+          enabledByUser: true, quotaAware: automation.quotaAware,
+          intervalMinutes: automation.intervalMinutes,
+          model: selectedModel.slug, reasoningEffort,
+          ...(quotaPolicyRecords.get(projectId)?.request.automationId
+            ? { automationId: quotaPolicyRecords.get(projectId).request.automationId } : {}),
+        };
+        // Do not mutate a native schedule while its project mapping is ambiguous.
+        await updateAndApplyQuotaPolicy(request, rpc);
+        quotaPolicyRecords.get(projectId).deviceId = credentials.deviceId;
+        await persistQuotaPolicies();
+        devicePolicyProjects.add(projectId);
+        devicePolicySnapshots.set(projectId, snapshot);
+      },
+    });
+    for (const projectId of devicePolicyProjects) {
+      if (!result.projectIds.includes(projectId)) {
+        await pauseProject(projectId);
+        devicePolicyProjects.delete(projectId);
+      }
+    }
+  } catch (error) {
+    // Revocation, missing credentials and connection failure must not leave a
+    // previously synced cloud schedule active indefinitely.
+    for (const projectId of devicePolicyProjects) {
+      await pauseProject(projectId).catch((failure) => console.error(`Device schedule pause failed: ${failure.message}`));
+    }
+    if (error.code !== "ENOENT") console.error(`Device schedule synchronization failed: ${error.message}`);
+  } finally {
+    devicePolicySyncInFlight = false;
+  }
+}
+
+function startDevicePolicySynchronization() {
+  if (devicePolicyTimer) return;
+  devicePolicyTimer = setInterval(() => { void synchronizeDevicePolicies(); }, 30_000);
+  devicePolicyTimer.unref();
+}
+
 async function restoreQuotaPolicies(cdp) {
   registerQuotaPolicyCdp(cdp);
   if (restoredQuotaPolicyCdps.has(cdp)) return;
@@ -2226,6 +2393,8 @@ async function restoreQuotaPolicies(cdp) {
   if (pending) return pending;
   const restoring = (async () => {
     await ensureQuotaPoliciesLoaded();
+    await synchronizeDevicePolicies();
+    startDevicePolicySynchronization();
     for (const [projectId, record] of quotaPolicyRecords) {
       if (record.request.enabledByUser) {
         await enqueueCurrentQuotaPolicy(projectId);
@@ -3304,6 +3473,21 @@ async function main() {
   const cleanup = () => {
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
+      if (devicePolicyTimer) clearInterval(devicePolicyTimer);
+      devicePolicyTimer = null;
+      for (const projectId of devicePolicyProjects) {
+        const request = quotaPolicyRecords.get(projectId)?.request;
+        if (!request) continue;
+        try {
+          await updateAndApplyQuotaPolicy({ ...request, enabledByUser: false }, (method, body) => (
+            requestCodexAutomationViaCdp(currentQuotaPolicyCdp(), undefined, method, body)
+          ));
+        } catch (error) {
+          console.error(`Could not pause device schedule on shutdown: ${error.message}`);
+        }
+      }
+      for (const timer of quotaPolicyTimers.values()) clearTimeout(timer);
+      quotaPolicyTimers.clear();
       injectedTargets.forEach((connection) => {
         unregisterRoutableCodexConnection(connection);
         unregisterQuotaPolicyCdp(connection);

@@ -184,6 +184,10 @@ async function host(t, { tasks = [todo("448")], existing = true } = {}) {
   })()`, {
     createHash, path, mkdir, readFile, writeFile, fetch, Date: Clock, setTimeout, clearTimeout,
     console: { error: (message) => errors.push(message) }, process: { pid: 448 },
+    taskboardDataDirectory: directory,
+    devicePolicySyncInFlight: false, devicePolicyTimer: null,
+    devicePolicySnapshots: new Map(), devicePolicyProjects: new Set(),
+    setInterval: () => ({ unref() {} }),
     automationPoliciesPath, taskboardBaseUrl: "http://taskboard.test/isolated",
     taskConversationAppServerTimeoutMs: 30_000, remoteAutomationTurnTimeoutMs: 30 * 60_000,
     codexAutomationRequestSequence: 0, codexAppServerRequestSequence: 0,
@@ -263,7 +267,7 @@ test("local wait rounds pause cron before semantic work, retain intent and survi
   assert.ok(h.apiCalls.every((call) => call.method === "GET"));
   assert.ok(h.models.every((call) => call.hostId === "local"));
   assert.equal(h.models[0].input.description, before[0].description);
-  assert.equal(h.models[0].input.latestComment.body, "Do not implement yet.");
+  assert.equal(h.models[0].input.comments.at(-1).body, "Do not implement yet.");
   assert.deepEqual(h.errors, []);
 });
 

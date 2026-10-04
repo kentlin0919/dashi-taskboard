@@ -82,6 +82,8 @@
   let hostRequests = new Map();
   let hostRequestSequence = 0;
   let hostHeartbeatAt = 0;
+  let waitingForHostRecovery = false;
+  let hostRecoveryAttempted = false;
   let observer = null;
   let reattachTimer = null;
   let hostContextTimer = null;
@@ -792,13 +794,32 @@
     return `codex-user-${(hash >>> 0).toString(36)}`;
   }
 
+  function isVisibleMenu(element) {
+    if (!element?.isConnected) return false;
+    if (element.getAttribute("aria-hidden") === "true") return false;
+    if (element.getAttribute("data-state") === "closed") return false;
+    try {
+      const style = window.getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+    } catch (_) {}
+    return (
+      element.getClientRects().length > 0
+      || element.getAttribute("data-state") === "open"
+      || element.offsetParent !== null
+    );
+  }
+
   function codexProfileMenu(profileButton) {
     const menuId = profileButton.getAttribute("aria-controls");
     const menu = menuId ? document.getElementById(menuId) : null;
-    return menu?.getAttribute("role") === "menu"
+    if (
+      menu?.getAttribute("role") === "menu"
       && menu.getAttribute("aria-labelledby") === profileButton.id
-      ? menu
-      : null;
+    ) {
+      return menu;
+    }
+    const visibleMenus = Array.from(document.querySelectorAll('[role="menu"]')).filter(isVisibleMenu);
+    return visibleMenus.length === 1 ? visibleMenus[0] : null;
   }
 
   function readCodexProfileIdentity(profileButton) {
@@ -841,10 +862,17 @@
   }
 
   async function readCodexUser(userId) {
-    const profileButton = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((button) => (
+    const menuButtons = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'));
+    let profileButton = menuButtons.find((button) => (
       normalizedLabel(button.getAttribute("aria-label")).includes("profile")
       || normalizedLabel(button.getAttribute("aria-label")).includes("个人资料")
     ));
+    if (!profileButton) {
+      const imageBearingButtons = menuButtons.filter((button) => Boolean(button.querySelector("img")));
+      if (imageBearingButtons.length === 1) {
+        profileButton = imageBearingButtons[0];
+      }
+    }
     if (!profileButton) throw hostError("未找到 Codex 个人资料菜单", "Could not find the Codex profile menu");
     const openedMenu = profileButton.getAttribute("aria-expanded") !== "true";
     let identity;
@@ -1676,6 +1704,7 @@
 
   function reloadFrame() {
     if (!frame) return false;
+    waitingForHostRecovery = false;
     const generation = ++openGeneration;
     if (active) showLoading();
     const frameRequest = loadTaskboardFrame(true);
@@ -1688,6 +1717,7 @@
       })
       .catch((error) => {
         if (!active || generation !== openGeneration) return;
+        waitingForHostRecovery = error.code === "HOST_UNAVAILABLE" && !hostRecoveryAttempted;
         showLoadError(error);
       });
     return true;
@@ -1713,10 +1743,12 @@
 
   function requestHost(action, payload = {}, timeoutMs = HOST_REQUEST_TIMEOUT_MS) {
     if (!hasLiveHostBinding()) {
-      return Promise.reject(hostError(
+      const error = hostError(
         "Taskboard 启动器未运行，无法操作 Codex 对话输入框",
         "The Taskboard launcher is not running, so the Codex composer is unavailable",
-      ));
+      );
+      error.code = "HOST_UNAVAILABLE";
+      return Promise.reject(error);
     }
 
     const id = `${Date.now().toString(36)}-${(++hostRequestSequence).toString(36)}`;
@@ -1726,6 +1758,7 @@
         : window.setTimeout(() => {
           hostRequests.delete(id);
           const error = hostError("任务面板启动器没有响应", "The Taskboard launcher did not respond");
+          if (!hasLiveHostBinding()) error.code = "HOST_UNAVAILABLE";
           if (action === "start-task-conversation") error.uncertain = true;
           reject(error);
         }, timeoutMs);
@@ -1792,12 +1825,18 @@
     if (message.type === HOST_HEARTBEAT_MESSAGE) {
       hostHeartbeatAt = Number(message.at) || 0;
       window[HOST_STARTUP_TOKEN_NAME] = message.startupToken ?? null;
+      if (active && !destroyed && waitingForHostRecovery && hasLiveHostBinding()) {
+        waitingForHostRecovery = false;
+        hostRecoveryAttempted = true;
+        void prepareTaskboard(++openGeneration);
+      }
       return;
     }
     if (message.type === HOST_RESPONSE_MESSAGE) onHostResponse(message.response);
   }
 
   async function prepareTaskboard(generation) {
+    waitingForHostRecovery = false;
     const taskboardUrl = resolveTaskboardUrl();
     // Do not expose a reused frame with a stale/default actor while identity is being captured.
     showLoading();
@@ -1827,6 +1866,7 @@
       postHostContext();
     } catch (error) {
       if (!active || generation !== openGeneration) return;
+      waitingForHostRecovery = error.code === "HOST_UNAVAILABLE" && !hostRecoveryAttempted;
       const bindingAvailable = hasLiveHostBinding();
       showLoadError(bindingAvailable
         ? error
@@ -1919,6 +1959,7 @@
     if (!active && page?.hidden !== false) return;
     openGeneration += 1;
     active = false;
+    waitingForHostRecovery = false;
     if (page) page.hidden = true;
     restoreNativeContent();
     restoreNativeBrowserPanel();
@@ -1932,6 +1973,7 @@
 
   function openTaskboard() {
     if (destroyed) return;
+    hostRecoveryAttempted = false;
     if (!active) {
       lastFocusedElement = document.activeElement;
       hostContextSnapshot = readHostContext();
@@ -2027,6 +2069,7 @@
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    waitingForHostRecovery = false;
     if (reattachTimer !== null) window.clearTimeout(reattachTimer);
     reattachTimer = null;
     if (hostContextTimer !== null) window.clearInterval(hostContextTimer);
