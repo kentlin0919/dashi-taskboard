@@ -1941,14 +1941,18 @@ async function applyTaskboardAutomationPolicy(
     todoGate = await localAutomationTodoGate(
       request, todoPayload.tasks, todoGate, evaluatedTodoGate,
     );
-    if (todoGate && todoGate.state !== "start") operation = "pause";
+    if (todoGate?.state === "checking") operation = "pause";
+    // "start" here permits the scheduled scan; each card still requires fresh
+    // start permission in the cron prompt. Do not retain an automatic pause
+    // marker after resuming, or a later manual pause would be overridden.
+    else if (todoGate?.state === "wait") todoGate = { ...todoGate, state: "start" };
   } else if (operation === "list") {
     todoGate = undefined; // A native/manual pause is not an automatic wait.
   }
   if (!stillCurrent()) return { quota, stale: true };
   const idleReason = todoGate?.state === "checking"
     ? "checking-todos"
-    : todoGate?.state === "wait" ? "waiting-todos" : undefined;
+    : undefined;
   const result = operation === "list"
     ? { item: currentItem, items: listed.items }
     : await reconcileTaskboardAutomation({ ...request, operation }, rpc);

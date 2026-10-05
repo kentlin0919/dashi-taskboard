@@ -106,7 +106,7 @@ export function buildTaskboardAutomationPrompt(request) {
   const remoteProjects = request.remoteProjects ?? [];
   const candidateInstructions = [
     "从返回的 todo 中只选择依赖已完成的议题：relations.blockedBy 为空，或其中每个依赖的 status 都严格等于 done。无依赖的 todo 仍可并行处理。若有 todo 但全部被未完成依赖阻塞，本轮直接结束，不暂停自动化，也不创建或打开新的任务会话。",
-    "每次仅处理一个符合依赖条件的 todo：选定后先用 issue get 读取最新议题内容，并用 comment list 读取全部评论、attachment list --task 读取议题附件（评论附件也要检查）。根据描述和当前有效评论判断是否允许开始；若其中写明等待、暂不执行或当前不应开始，立即跳过并报告，不改状态。评论也包含已完成后被打回的返工要求。",
+    "每次仅处理一个符合依赖条件的 todo：选定后先用 issue get 读取最新议题内容，并用 comment list 读取全部评论、attachment list --task 读取议题附件（评论附件也要检查）。根据描述和当前有效评论判断是否允许开始；若其中写明等待、暂不执行或当前不应开始，只跳过该卡片并报告，不改状态；继续检查同一项目的下一张 todo，不因单张卡片等待而结束本轮或暂停排程。全部卡片均须等待时，本轮不认领，保持排程启用，下一次按间隔重新检查。每次最多处理一张允许开始的卡片。评论也包含已完成后被打回的返工要求。",
     "完整 threadBinding 五栏与当前会话身份都一致时，直接在本会话依最新要求继续，保留原绑定，不重新认领或传讯自己。否则已有 threadId 或完整 threadBinding 时，发送前先用 Codex read_thread 读取目标会话最新执行状态，必要时用 wait_threads 的即时快照确认。目标仍在执行、状态未知、正在等待使用者，或相同要求已交接且没有新增要求时，保留原绑定并跳过，不重复传讯。不得对当前 CODEX_THREAD_ID 发送讯息。只有确认目标闲置且本次有未交接的新要求时，才按下文使用原绑定发送。超时、网络失败及主机不可达不是 stale 证据；只有工具明确返回 NOT_FOUND 或 CLOSED 等终态时，才能按后文处理 stale，不必用发送消息探测。",
     "完成 issue get、comment list 和 attachment list 后、移动状态前，必须再次运行这三个读取命令，确认主文、全部评论及附件清单没有新增、编辑或删除；若发生变化重新判断开始条件，不得沿用旧判定。复核 relations.blockedBy 仍为空或其中每个依赖的 status 都严格等于 done。若依赖条件不再满足，立即跳过并结束本轮，不改状态，也不暂停自动化。",
   ];
