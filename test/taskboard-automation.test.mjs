@@ -243,7 +243,7 @@ test("the generated cron spec uses the selected whitelisted local Codex options"
     reasoningEffort: "medium",
   }), {
     ...buildTaskboardAutomationSpec(baseRequest),
-    prompt: buildTaskboardAutomationPrompt({ ...baseRequest, intervalMinutes: 30 }),
+    prompt: buildTaskboardAutomationPrompt({ ...baseRequest, intervalMinutes: 30, model: "gpt-5.4", reasoningEffort: "medium" }),
     model: "gpt-5.4",
     reasoningEffort: "medium",
     rrule: "RRULE:FREQ=MINUTELY;INTERVAL=30",
