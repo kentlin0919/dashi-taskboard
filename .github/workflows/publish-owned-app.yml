@@ -1,4 +1,4 @@
-name: Publish owned macOS App (unloaded conversation handoff)
+name: Publish owned macOS App (confirmed conversation handoff)
 
 on:
   workflow_dispatch:
