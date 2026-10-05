@@ -234,7 +234,7 @@ async function host(t, { tasks = [todo("448")], existing = true } = {}) {
   };
 }
 
-test("local wait rounds pause cron before semantic work, retain intent and survive restore", async (t) => {
+test("local wait rounds resume scheduled scans, retain intent and survive restore", async (t) => {
   const binding = { threadId: "old-thread", codexProjectId: "old-project",
     codexProjectKind: "local", codexHostId: "local", workspacePath: String.raw`C:\old` };
   const h = await host(t, { tasks: [todo("448"), todo("449", {
@@ -251,17 +251,17 @@ test("local wait rounds pause cron before semantic work, retain intent and survi
   assert.equal(h.models.length, 0, "the UI save must not wait for a semantic turn");
   await h.advance(1_000);
   assert.equal(h.models.length, 2);
-  assert.equal((await h.check()).idleReason, "waiting-todos");
+  assert.equal((await h.check()).idleReason, undefined);
   await h.advance(15 * 60_000); // Three reported five-minute cron rounds.
-  assert.equal(h.persistentConversations, 0);
+  assert.equal(h.persistentConversations, 3);
   assert.equal(h.models.length, 2, "unchanged waiting snapshots should reuse the decision");
   assert.equal(h.records.get("local").request.enabledByUser, true);
-  assert.equal((await h.readPolicy()).todoGate.state, "wait");
+  assert.equal((await h.readPolicy()).todoGate.state, "start");
   await h.reload();
   await h.advance(5 * 60_000);
   assert.equal(h.records.get("local").request.enabledByUser, true);
-  assert.equal((await h.check()).idleReason, "waiting-todos");
-  assert.equal(h.persistentConversations, 0);
+  assert.equal((await h.check()).idleReason, undefined);
+  assert.equal(h.persistentConversations, 4);
   assert.equal(h.models.length, 2);
   assert.deepEqual(h.tasks, before);
   assert.ok(h.apiCalls.every((call) => call.method === "GET"));
@@ -280,7 +280,7 @@ test("new executable legacy-bound todo resumes the same cron without touching wa
   h.comments.set("450", [comment("Continue in the original conversation.")]);
   h.decisions.set("LOCAL-450", "start");
   const before = clone(h.tasks);
-  await h.advance(60_000);
+  await h.check();
   assert.equal(h.item.status, "PAUSED");
   await h.advance(1_000);
   assert.equal(h.item.status, "ACTIVE");
@@ -300,7 +300,7 @@ test("description and latest-comment edits invalidate waiting decisions, includi
   const h = await host(t, { existing: false });
   await h.save();
   await h.advance(1_000);
-  assert.equal(h.item, null, "all-wait enable must not even create a cron");
+  assert.equal(h.item.status, "ACTIVE", "waiting cards must not disable scheduled scans");
   h.tasks[0].description = "Implementation is authorized.";
   h.comments.set("448", [comment("Proceed.")]);
   h.decisions.set("LOCAL-448", "start");
@@ -313,11 +313,11 @@ test("description and latest-comment edits invalidate waiting decisions, includi
     // Change only comment body: task version and comment identity stay unchanged.
   });
   await h.advance(1_000);
-  assert.equal(h.item, null, "a stale start result must not activate cron");
+  assert.equal(h.item.status, "PAUSED", "a stale start result must not activate cron");
   assert.equal(h.records.get("local").todoGate.state, "checking");
   h.decisions.set("LOCAL-448", "wait");
   await h.advance(1_000);
-  assert.equal((await h.check()).idleReason, "waiting-todos");
+  assert.equal((await h.check()).idleReason, undefined);
   h.comments.get("448")[0].body = "Revised specification approved. Proceed.";
   h.decisions.set("LOCAL-448", "start");
   await h.check();

@@ -211,7 +211,7 @@ test("the generated automation command uses the packaged CLI and an argv runtime
     const prompt = buildTaskboardAutomationPrompt(baseRequest);
     const cliPath = fileURLToPath(new URL("../cli/taskctl.mjs", import.meta.url));
     assert.ok(prompt.includes(
-      `'${process.execPath}' '${cliPath}' --runtime-file '${process.env.CODEX_TASKBOARD_RUNTIME_FILE}'`,
+      `${process.platform === "win32" ? "" : "env -u CODEX_TASKBOARD_URL -u CODEX_TASKBOARD_COMPANION_URL "}'${process.execPath}' '${cliPath}' --runtime-file '${process.env.CODEX_TASKBOARD_RUNTIME_FILE}'`,
     ));
     assert.ok(!prompt.includes(path.resolve(path.dirname(baseRequest.skillPath), "../..", "cli/taskctl.mjs")));
     assert.doesNotMatch(prompt, /CODEX_TASKBOARD_RUNTIME_FILE=/);
@@ -243,7 +243,7 @@ test("the generated cron spec uses the selected whitelisted local Codex options"
     reasoningEffort: "medium",
   }), {
     ...buildTaskboardAutomationSpec(baseRequest),
-    prompt: buildTaskboardAutomationPrompt({ ...baseRequest, intervalMinutes: 30 }),
+    prompt: buildTaskboardAutomationPrompt({ ...baseRequest, intervalMinutes: 30, model: "gpt-5.4", reasoningEffort: "medium" }),
     model: "gpt-5.4",
     reasoningEffort: "medium",
     rrule: "RRULE:FREQ=MINUTELY;INTERVAL=30",
