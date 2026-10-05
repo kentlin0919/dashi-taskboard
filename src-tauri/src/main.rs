@@ -2159,7 +2159,7 @@ fn install_update(
     state: &Arc<LauncherState>,
     update: Update,
     bytes: &[u8],
-    update_dialog: &UpdateDialog,
+    update_dialog: Option<&UpdateDialog>,
 ) -> Result<(), String> {
     let update_version = update.version.clone();
     state.update_in_progress.store(true, Ordering::SeqCst);
@@ -2168,7 +2168,7 @@ fn install_update(
         snapshot.update_message = "正在安装更新…".into();
         snapshot.update_available = false;
     });
-    update_dialog.show_installing(&snapshot.update_message);
+    if let Some(dialog) = update_dialog { dialog.show_installing(&snapshot.update_message); }
     {
         let _lifecycle = state.lifecycle.lock().unwrap();
         if state.intentional_stop.load(Ordering::SeqCst) {
@@ -2214,7 +2214,7 @@ fn install_update(
     let snapshot = update_snapshot(app, state, |snapshot| {
         snapshot.update_message = "正在重启…".into();
     });
-    update_dialog.set_progress(&snapshot.update_message, None, false);
+    if let Some(dialog) = update_dialog { dialog.set_progress(&snapshot.update_message, None, false); }
     app.restart()
 }
 
@@ -2248,19 +2248,15 @@ async fn offer_update(
         check_update.set_enabled(false).unwrap();
         return;
     }
-    if show_current_version {
-        if state
-            .update_flow_in_progress
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        check_update.set_text("正在檢查 APP 更新…").unwrap();
-        check_update.set_enabled(false).unwrap();
-    } else if state.update_flow_in_progress.load(Ordering::SeqCst) {
+    if state
+        .update_flow_in_progress
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return;
     }
+    check_update.set_text("正在檢查 APP 更新…").unwrap();
+    check_update.set_enabled(false).unwrap();
     let update = match prepare_available_update(app, state, !show_current_version).await {
         Ok(update) => update,
         Err(error) => {
@@ -2275,12 +2271,24 @@ async fn offer_update(
                     "Codex Taskboard 更新检查失败",
                     &format!("无法检查更新。请稍后重试。\n\n{error}"),
                 );
-                finish_update_flow(state, check_update, quit);
             }
+            finish_update_flow(state, check_update, quit);
             return;
         }
     };
     if !show_current_version {
+        if let Some(update) = update {
+            match update.download.clone().await {
+                Ok(bytes) => {
+                    quit.set_enabled(false).unwrap();
+                    if let Err(error) = install_update(app, state, update.update, &bytes, None) {
+                        append_log(state, &format!("Automatic update failed: {error}"));
+                    }
+                }
+                Err(error) => append_log(state, &format!("Automatic update preparation failed: {error}")),
+            }
+        }
+        finish_update_flow(state, check_update, quit);
         return;
     }
     let Some(update) = update else {
@@ -2327,7 +2335,7 @@ async fn offer_update(
         }
     };
     quit.set_enabled(false).unwrap();
-    match install_update(app, state, update.update, &bytes, &update_dialog) {
+    match install_update(app, state, update.update, &bytes, Some(&update_dialog)) {
         Ok(()) => {
             update_dialog.close();
             finish_update_flow(state, check_update, quit);
