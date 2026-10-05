@@ -1,4 +1,4 @@
-name: Publish owned macOS App
+name: Publish owned macOS App (automatic updater)
 
 on:
   workflow_dispatch:
