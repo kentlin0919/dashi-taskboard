@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [codex/action-app-release]
+    branches: [codex/action-app-release, codex/per-card-autoclaim]
     paths: [.github/workflows/publish-owned-app.yml]
 
 permissions:
@@ -109,7 +109,7 @@ jobs:
           VERSION="$(jq -r .version latest.json)"
           TAG="v$VERSION"
           DMG="Codex.Taskboard_${VERSION}_macOS-universal.dmg"
-          printf '%s\n' 'APP 選單支援更新 APP；人工操作使用雲端使用者身分。' 'macOS Universal，採用更新包簽章與 ad-hoc App 簽章，尚未 Apple notarization。' > "$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' '自動認領逐卡略過等待任務，保持排程檢查其他卡片；保留手動暫停與額度控制。' 'macOS Universal，採用更新包簽章與 ad-hoc App 簽章，尚未 Apple notarization。' > "$RUNNER_TEMP/release-notes.md"
           gh release create "$TAG" "$DMG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "Codex Taskboard $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
           gh release upload "$TAG" *.tar.gz *.sig latest.json SHA256SUMS --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
