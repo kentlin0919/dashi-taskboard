@@ -1,4 +1,4 @@
-name: Publish owned macOS App (cloud queue updater)
+name: Publish owned macOS App (unloaded conversation handoff)
 
 on:
   workflow_dispatch:
