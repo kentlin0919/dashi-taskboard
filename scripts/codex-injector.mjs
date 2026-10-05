@@ -1938,9 +1938,13 @@ async function applyTaskboardAutomationPolicy(
     idlePaused: todoGate?.state === "checking" || todoGate?.state === "wait",
   });
   if (operation === "ensure-active") {
-    todoGate = await localAutomationTodoGate(
-      request, todoPayload.tasks, todoGate, evaluatedTodoGate,
-    );
+    // Cloud card presence controls scheduling. Start permission is checked per
+    // card by the cron prompt, never by pausing the whole cloud queue.
+    todoGate = request.cloudUrl
+      ? { snapshot: "cloud-queue", state: "start" }
+      : await localAutomationTodoGate(
+        request, todoPayload.tasks, todoGate, evaluatedTodoGate,
+      );
     if (todoGate?.state === "checking") operation = "pause";
     // "start" here permits the scheduled scan; each card still requires fresh
     // start permission in the cron prompt. Do not retain an automatic pause
